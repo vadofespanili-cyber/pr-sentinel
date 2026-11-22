@@ -238,6 +238,41 @@ def test_empty_optional_inputs_are_not_forwarded(stub_bin):
     assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 42"
 
 
+def test_whitespace_only_inputs_are_not_forwarded(stub_bin):
+    """Whitespace-only fail_on_severity / sarif_out inputs count as
+    empty and add no flags at all (tested with real sh)."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_FAIL_ON_SEVERITY": "   ",
+            "INPUT_SARIF_OUT": " \t ",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 42"
+
+
+def test_whitespace_around_inputs_is_trimmed(stub_bin):
+    """Surrounding whitespace is trimmed before forwarding."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_FAIL_ON_SEVERITY": " high ",
+            "INPUT_SARIF_OUT": " out.sarif ",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert (
+        argv
+        == "review --repo o/r --pr 42 --fail-on-severity high --sarif-out out.sarif"
+    )
+
+
 def test_config_path_combines_with_new_inputs(stub_bin, tmp_path):
     """--config, --fail-on-severity and --sarif-out compose in one call."""
     config = tmp_path / "custom.yaml"
