@@ -66,11 +66,72 @@ def test_new_line_position_values():
     assert a.new_line_position(2) == 3  # "import sys", header + context + add
     assert a.new_line_position(12) == 9  # "return 2" in second hunk
     assert a.new_line_position(13) == 10  # "return 3" in second hunk
-    assert a.new_line_position(1) is None  # context line, not added
+    # Context lines exist in the new file too, so they have a position
+    # (since v0.1.2); only removed lines and unknown lines do not.
+    assert a.new_line_position(1) == 2  # context line "import os"
     assert a.new_line_position(99) is None
     b = files[1]
     assert b.new_line_position(1) == 2
     assert b.new_line_position(2) == 3
+
+
+def test_new_line_position_covers_context_lines():
+    files = parse_diff(MULTI_FILE_DIFF)
+    a = files[0]
+    assert a.new_line_position(1) == 2  # context line "import os"
+    assert a.new_line_position(3) == 4  # context line 'print("hello")'
+    assert a.new_line_position(11) == 7  # context line "def f():"
+    assert a.new_line_position(99) is None
+
+
+SPACED_FILE_DIFF = (
+    'diff --git "a/my file.txt" "b/my file.txt"\n'
+    "new file mode 100644\n"
+    "--- /dev/null\n"
+    '+++ "b/my file.txt"\n'
+    "@@ -0,0 +1,1 @@\n"
+    "+hello\n"
+)
+
+
+def test_filename_with_spaces_new_file():
+    """Git C-style-quotes paths with spaces; the quoted --- /+++ lines
+    must not corrupt the path either (the bug bit new files hardest,
+    because their path comes only from the header)."""
+    files = parse_diff(SPACED_FILE_DIFF)
+    assert [f.path for f in files] == ["my file.txt"]
+    assert files[0].old_path == "my file.txt"
+    assert files[0].is_new
+    assert files[0].added_lines == 1
+
+
+def test_filename_with_spaces_modified_file():
+    diff = (
+        'diff --git "a/my file.txt" "b/my file.txt"\n'
+        '--- "a/my file.txt"\n'
+        '+++ "b/my file.txt"\n'
+        "@@ -1,1 +1,2 @@\n"
+        " context\n"
+        "+added\n"
+    )
+    files = parse_diff(diff)
+    assert files[0].path == "my file.txt"
+    assert files[0].old_path == "my file.txt"
+    assert files[0].added_lines == 1
+
+
+def test_filename_with_escaped_quote():
+    diff = (
+        'diff --git "a/we\\"ird.txt" "b/we\\"ird.txt"\n'
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        '+++ "b/we\\"ird.txt"\n'
+        "@@ -0,0 +1,1 @@\n"
+        "+hello\n"
+    )
+    files = parse_diff(diff)
+    assert files[0].path == 'we"ird.txt'
+    assert files[0].old_path == 'we"ird.txt'
 
 
 def test_deleted_file_keeps_its_path():
