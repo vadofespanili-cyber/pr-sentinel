@@ -138,6 +138,29 @@ def test_invalid_int_error():
         parse_config_text("max_files: many\n")
 
 
+def test_api_base_url_validation():
+    assert (
+        parse_config_text("api_base_url: https://api.example.com/v1\n").api_base_url
+        == "https://api.example.com/v1"
+    )
+    # Plain http:// is still allowed: local fake servers in the tests use
+    # it, and the CLI warns about it when the key is actually sent.
+    assert (
+        parse_config_text("api_base_url: http://localhost:9/v1\n").api_base_url
+        == "http://localhost:9/v1"
+    )
+    for bad in ["httpfoo", "", "ftp://example.com/v1", "http://", "://no-scheme"]:
+        with pytest.raises(ConfigError, match="api_base_url"):
+            parse_config_text(f"api_base_url: {bad}\n")
+
+
+def test_escaped_quote_before_hash_does_not_truncate():
+    # An escaped quote inside a double-quoted string must not toggle the
+    # quote state: the # after the closing quote is a comment, not data.
+    config = parse_config_text('model: "a\\"b" # trailing comment\n')
+    assert config.model == 'a"b'
+
+
 def test_api_key_from_env():
     assert api_key_from_env({}) is None
     assert api_key_from_env({"PR_SENTINEL_API_KEY": "sk-fake-test"}) == "sk-fake-test"
