@@ -184,3 +184,186 @@ def test_missing_token_raises_github_error(github_server):
     with pytest.raises(GitHubError):
         client.get_pull("o", "r", 1)
     assert FakeGitHubHandler.requests == []
+
+
+def test_empty_token_raises_github_error(github_server):
+    """An empty-string token is rejected, not sent as an empty Bearer."""
+    client = GitHubClient(token="", base_url=github_server)
+    with pytest.raises(GitHubError):
+        client.get_pull("o", "r", 1)
+    assert FakeGitHubHandler.requests == []
+
+
+# --- Scripted server for error/retry behaviour ------------------------------
+# Serves a fixed sequence of (status, headers, body) responses, one per
+# request; once the script runs out, the last response repeats.
+
+
+class _ScriptedHandler(BaseHTTPRequestHandler):
+    """Fake API that serves a scripted sequence of responses."""
+
+    protocol_version = "HTTP/1.1"
+
+    def _serve(self):
+        index = min(self.server.hits, len(self.server.script) - 1)
+        status, extra_headers, body = self.server.script[index]
+        self.server.hits += 1
+        raw = body if isinstance(body, bytes) else body.encode("utf-8")
+        self.send_response(status)
+        for key, value in extra_headers.items():
+            self.send_header(key, value)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):
+        self._serve()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+        self._serve()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def scripted_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ScriptedHandler)
+    server.script = [(200, {}, "{}")]
+    server.hits = 0
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _scripted_client(scripted_server):
+    return GitHubClient(
+        token="fake-token",
+        base_url=f"http://127.0.0.1:{scripted_server.server_address[1]}",
+    )
+
+
+def test_invalid_json_response_raises_github_error(scripted_server, monkeypatch):
+    """A 200 with an unparseable body is a GitHubError, not a crash."""
+    import pr_sentinel.github_client as gc
+
+    monkeypatch.setattr(gc, "_sleep", lambda seconds: None)
+    scripted_server.script = [(200, {}, "this is not json")]
+    with pytest.raises(GitHubError, match="invalid JSON"):
+        _scripted_client(scripted_server).get_pull("o", "r", 1)
+
+
+def test_timeout_raises_github_error(monkeypatch, github_server):
+    """TimeoutError is not a URLError on Python 3.10+; it must still be
+    converted to GitHubError (after the retries, without waiting)."""
+    import urllib.request
+
+    import pr_sentinel.github_client as gc
+
+    calls = []
+    monkeypatch.setattr(gc, "_sleep", lambda seconds: None)
+
+    def boom(*args, **kwargs):
+        calls.append(1)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(GitHubError):
+        GitHubClient(token="fake-token", base_url=github_server).get_pull("o", "r", 1)
+    assert len(calls) == 3  # retried up to the attempt limit
+
+
+def test_retries_after_429_then_succeeds(scripted_server, monkeypatch):
+    """A 429 followed by a 200 succeeds, and the Retry-After header is
+    honored as the delay."""
+    import pr_sentinel.github_client as gc
+
+    delays = []
+    monkeypatch.setattr(gc, "_sleep", delays.append)
+    scripted_server.script = [
+        (429, {"Retry-After": "2"}, '{"message": "rate limited"}'),
+        (200, {}, '{"number": 1, "title": "Test PR"}'),
+    ]
+    result = _scripted_client(scripted_server).get_pull("o", "r", 1)
+    assert result == {"number": 1, "title": "Test PR"}
+    assert scripted_server.hits == 2
+    assert delays == [2.0]
+
+
+def test_persistent_500_raises_after_three_attempts(scripted_server, monkeypatch):
+    """A persistent 5xx is retried with exponential backoff, then raises
+    after the third attempt."""
+    import pr_sentinel.github_client as gc
+
+    delays = []
+    monkeypatch.setattr(gc, "_sleep", delays.append)
+    scripted_server.script = [(500, {}, '{"message": "boom"}')]
+    with pytest.raises(GitHubError) as excinfo:
+        _scripted_client(scripted_server).get_pull("o", "r", 1)
+    assert excinfo.value.status == 500
+    assert scripted_server.hits == 3
+    assert delays == [1.0, 2.0]
+
+
+def test_post_500_is_not_retried(scripted_server, monkeypatch):
+    """A 5xx on a POST must not be retried: the server may have processed
+    the request and lost the response, so a retry could repeat the side
+    effect (e.g. post the review twice)."""
+    import pr_sentinel.github_client as gc
+
+    delays = []
+    monkeypatch.setattr(gc, "_sleep", delays.append)
+    scripted_server.script = [(500, {}, '{"message": "boom"}')]
+    with pytest.raises(GitHubError) as excinfo:
+        _scripted_client(scripted_server).add_labels("o", "r", 1, ["x"])
+    assert excinfo.value.status == 500
+    assert scripted_server.hits == 1
+    assert delays == []
+
+
+def test_post_429_is_retried_then_succeeds(scripted_server, monkeypatch):
+    """A 429 is safe to retry for POST too: the request was rejected
+    before processing."""
+    import pr_sentinel.github_client as gc
+
+    delays = []
+    monkeypatch.setattr(gc, "_sleep", delays.append)
+    scripted_server.script = [
+        (429, {"Retry-After": "1"}, '{"message": "rate limited"}'),
+        (200, {}, '[{"name": "x"}]'),
+    ]
+    result = _scripted_client(scripted_server).add_labels("o", "r", 1, ["x"])
+    assert result == [{"name": "x"}]
+    assert scripted_server.hits == 2
+    assert delays == [1.0]
+
+
+def test_post_timeout_is_not_retried(monkeypatch, github_server):
+    """A TimeoutError on a POST must not be retried: the request may
+    already have been processed."""
+    import urllib.request
+
+    import pr_sentinel.github_client as gc
+
+    calls = []
+    monkeypatch.setattr(gc, "_sleep", lambda seconds: None)
+
+    def boom(*args, **kwargs):
+        calls.append(1)
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    with pytest.raises(GitHubError):
+        GitHubClient(token="fake-token", base_url=github_server).add_labels(
+            "o", "r", 1, ["x"]
+        )
+    assert len(calls) == 1
