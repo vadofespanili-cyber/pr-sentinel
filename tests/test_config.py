@@ -186,6 +186,20 @@ def test_fail_on_severity_none_spelling_is_normalized():
     assert Config(fail_on_severity="none").fail_on_severity is None
 
 
+def test_fail_on_severity_empty_string_is_none():
+    """A blank gate (empty string, e.g. from an empty Action input)
+    means "no gate", just like "none"."""
+    assert parse_config_text("fail_on_severity: ''\n").fail_on_severity is None
+    assert Config(fail_on_severity="").fail_on_severity is None
+    assert Config(fail_on_severity="   ").fail_on_severity is None
+
+
+def test_fail_on_severity_case_and_whitespace_are_normalized():
+    assert parse_config_text("fail_on_severity: HIGH\n").fail_on_severity == "high"
+    assert Config(fail_on_severity="  Low").fail_on_severity == "low"
+    assert Config(fail_on_severity=" None ").fail_on_severity is None
+
+
 def test_fail_on_severity_invalid_value():
     with pytest.raises(ConfigError, match="fail_on_severity"):
         parse_config_text("fail_on_severity: urgent\n")
