@@ -150,6 +150,41 @@ def test_summary_contains_hidden_marker():
     assert summary.rstrip("\n").splitlines()[-1] == SUMMARY_MARKER
 
 
+# --- Reviewed commit line (v0.2.1) ------------------------------------------
+
+
+def test_summary_shows_reviewed_commit_line():
+    """A given commit adds a "Reviewed commit: <short-sha>" line after
+    the footer and before the hidden marker."""
+    from pr_sentinel.reporter import SUMMARY_MARKER
+
+    summary = build_summary(
+        sample_findings(), pr_number=42, reviewed_commit="abc1234def5678"
+    )
+    assert "Reviewed commit: abc1234" in summary
+    lines = summary.rstrip("\n").splitlines()
+    assert lines[-1] == SUMMARY_MARKER
+    assert lines[-2] == ""
+    assert lines[-3] == "Reviewed commit: abc1234"
+    assert lines[-4] == "Reviewed by pr-sentinel"
+
+
+def test_summary_shows_reviewed_commit_line_without_findings():
+    summary = build_summary([], pr_number=7, reviewed_commit="deadbee1234")
+    assert "No findings" in summary
+    assert "Reviewed commit: deadbee" in summary
+
+
+def test_summary_omits_reviewed_commit_line_when_absent():
+    """Without a commit the output is byte-identical to v0.2.0: a
+    missing, empty or whitespace-only value adds no line at all."""
+    base = build_summary(sample_findings(), pr_number=42)
+    assert "Reviewed commit:" not in base
+    assert build_summary(sample_findings(), pr_number=42, reviewed_commit=None) == base
+    assert build_summary(sample_findings(), pr_number=42, reviewed_commit="") == base
+    assert build_summary(sample_findings(), pr_number=42, reviewed_commit="   ") == base
+
+
 # --- SARIF 2.1.0 output (v0.2.0) --------------------------------------------
 
 
