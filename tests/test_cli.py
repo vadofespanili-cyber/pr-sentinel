@@ -7,15 +7,17 @@ import threading
 import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import ClassVar
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 import pr_sentinel.cli as cli_module
 from pr_sentinel import __version__
-from pr_sentinel.cli import _prepare_review, main
+from pr_sentinel.cli import _post_review, _prepare_review, main
 from pr_sentinel.config import Config
 from pr_sentinel.diff import parse_diff
 from pr_sentinel.findings import Finding
+from pr_sentinel.reporter import SUMMARY_MARKER
 
 SAMPLE_DIFF = (
     "diff --git a/src/a.py b/src/a.py\n"
@@ -53,6 +55,9 @@ def _send_json(handler, status, payload):
 
 class FakeGitHubHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict]] = []
+    # Issue comments returned by GET /issues/1/comments, paginated at 100
+    # per page. Tests set this before running the CLI.
+    issue_comments: ClassVar[list[dict]] = []
     protocol_version = "HTTP/1.1"
 
     def _record(self, body=b""):
@@ -62,7 +67,12 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
-        if self.path == "/repos/o/r/pulls/1":
+        parsed = urlparse(self.path)
+        if parsed.path == "/repos/o/r/issues/1/comments":
+            page = int(parse_qs(parsed.query).get("page", ["1"])[0])
+            start = (page - 1) * 100
+            _send_json(self, 200, FakeGitHubHandler.issue_comments[start : start + 100])
+        elif self.path == "/repos/o/r/pulls/1":
             if self.headers.get("Accept") == "application/vnd.github.diff":
                 data = SAMPLE_DIFF.encode("utf-8")
                 self.send_response(200)
@@ -81,6 +91,17 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
         self._record(raw)
         if self.path == "/repos/o/r/pulls/1/reviews":
             _send_json(self, 200, {"id": 99, "state": "COMMENTED"})
+        elif self.path == "/repos/o/r/issues/1/comments":
+            _send_json(self, 200, {"id": 7, "body": "created"})
+        else:
+            _send_json(self, 404, {"message": "Not Found"})
+
+    def do_PATCH(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        self._record(raw)
+        if self.path.startswith("/repos/o/r/issues/comments/"):
+            _send_json(self, 200, {"id": 7, "body": "updated"})
         else:
             _send_json(self, 404, {"message": "Not Found"})
 
@@ -129,6 +150,7 @@ def point_github_client_at_fake_server(monkeypatch, github_server):
 @pytest.fixture()
 def github_server():
     FakeGitHubHandler.requests.clear()
+    FakeGitHubHandler.issue_comments.clear()
     server, thread = _start_server(FakeGitHubHandler)
     try:
         yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -252,6 +274,30 @@ def _write_config(tmp_path, model_server, extra=""):
 
 def _review_posted():
     return [r for r in FakeGitHubHandler.requests if r["path"].endswith("/reviews")]
+
+
+def _issue_comments_created():
+    return [
+        r
+        for r in FakeGitHubHandler.requests
+        if r["method"] == "POST" and r["path"] == "/repos/o/r/issues/1/comments"
+    ]
+
+
+def _issue_comments_updated():
+    return [
+        r
+        for r in FakeGitHubHandler.requests
+        if r["method"] == "PATCH" and "/issues/comments/" in r["path"]
+    ]
+
+
+def _issue_comments_listed():
+    return [
+        r
+        for r in FakeGitHubHandler.requests
+        if r["method"] == "GET" and "/issues/1/comments" in r["path"]
+    ]
 
 
 # --- check-config ------------------------------------------------------------
@@ -406,10 +452,15 @@ def test_review_dry_run_posts_nothing(
     assert "PR #1: Test PR" in out
     assert "Model finding." in out
     assert _review_posted() == []
+    # --dry-run must not touch issue comments either: no listing, no
+    # create, no update.
+    assert _issue_comments_listed() == []
+    assert _issue_comments_created() == []
+    assert _issue_comments_updated() == []
     assert json_out.is_file()
 
 
-def test_review_posts_summary_only_in_summary_mode(
+def test_review_summary_mode_posts_issue_comment_not_review(
     tmp_path,
     monkeypatch,
     capsys,
@@ -418,6 +469,8 @@ def test_review_posts_summary_only_in_summary_mode(
     stub_dependencies,
     point_github_client_at_fake_server,
 ):
+    """In summary mode the summary goes to an issue comment; no review
+    is created at all."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
     monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
@@ -425,12 +478,13 @@ def test_review_posts_summary_only_in_summary_mode(
 
     code = main(["review", "--repo", "o/r", "--pr", "1", "--config", str(config)])
     assert code == 0
-    posted = _review_posted()
-    assert len(posted) == 1
-    body = json.loads(posted[0]["body"])
-    assert body["event"] == "COMMENT"
+    assert _review_posted() == []
+    created = _issue_comments_created()
+    assert len(created) == 1
+    body = json.loads(created[0]["body"])
     assert "Model finding." in body["body"]
-    assert body["comments"] == []
+    assert SUMMARY_MARKER in body["body"]
+    assert _issue_comments_updated() == []
 
 
 def test_review_without_github_token_exits_3(
@@ -577,3 +631,487 @@ def test_review_diff_static_only_summary_names_static_checks(
     out = capsys.readouterr().out
     assert "deterministic static checks" in out
     assert "AI-generated suggestions" not in out
+
+
+# --- fail_on_severity CI gate (v0.2.0) ---------------------------------------
+
+EVAL_PATCH = (
+    "diff --git a/a.py b/a.py\n"
+    "--- a/a.py\n"
+    "+++ b/a.py\n"
+    "@@ -1,1 +1,2 @@\n"
+    " x = 1\n"
+    "+eval(user_input)\n"
+)
+
+
+def _write_eval_patch(tmp_path):
+    patch = tmp_path / "eval.patch"
+    patch.write_text(EVAL_PATCH, encoding="utf-8")
+    return patch
+
+
+def test_review_diff_fail_on_severity_high_exits_1(tmp_path, monkeypatch, capsys):
+    """A high static finding meets a high gate: exit 1, but the summary
+    is printed and the JSON output is still written."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    json_out = tmp_path / "findings.json"
+
+    code = main(
+        [
+            "review-diff",
+            "--file",
+            str(patch),
+            "--json-out",
+            str(json_out),
+            "--fail-on-severity",
+            "high",
+        ]
+    )
+    assert code == 1
+    out = capsys.readouterr()
+    assert "eval()" in out.out
+    assert "fail_on_severity=high" in out.err
+    findings = json.loads(json_out.read_text(encoding="utf-8"))
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "high"
+
+
+def test_review_diff_fail_on_severity_critical_exits_0(tmp_path, monkeypatch, capsys):
+    """A high finding does not meet a critical gate: exit 0."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+
+    code = main(["review-diff", "--file", str(patch), "--fail-on-severity", "critical"])
+    assert code == 0
+    assert "eval()" in capsys.readouterr().out
+
+
+def test_review_diff_fail_on_severity_config_file(tmp_path, monkeypatch, capsys):
+    """The gate can come from the config file."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text("fail_on_severity: high\n", encoding="utf-8")
+
+    assert main(["review-diff", "--file", str(patch), "--config", str(config)]) == 1
+    assert "fail_on_severity=high" in capsys.readouterr().err
+
+
+def test_review_diff_fail_on_severity_cli_overrides_config(
+    tmp_path, monkeypatch, capsys
+):
+    """The CLI flag wins over the config file, in both directions."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text("fail_on_severity: critical\n", encoding="utf-8")
+
+    # CLI "high" is stricter than the config's "critical": exit 1.
+    assert (
+        main(
+            [
+                "review-diff",
+                "--file",
+                str(patch),
+                "--config",
+                str(config),
+                "--fail-on-severity",
+                "high",
+            ]
+        )
+        == 1
+    )
+    # CLI "none" disables the config's gate entirely: exit 0.
+    assert (
+        main(
+            [
+                "review-diff",
+                "--file",
+                str(patch),
+                "--config",
+                str(config),
+                "--fail-on-severity",
+                "none",
+            ]
+        )
+        == 0
+    )
+    assert "eval()" in capsys.readouterr().out
+
+
+def test_review_diff_fail_on_severity_invalid_value_exits_2(tmp_path, monkeypatch):
+    """An invalid CLI gate value is a usage error (exit 2)."""
+    monkeypatch.chdir(tmp_path)
+    patch = _write_eval_patch(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        main(["review-diff", "--file", str(patch), "--fail-on-severity", "urgent"])
+    assert excinfo.value.code == 2
+
+
+def test_review_fail_on_severity_posts_before_exit_1(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """The review is posted (and JSON written) before the gate exits 1:
+    a failing gate must not swallow the report."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    config = _write_config(tmp_path, model_server)
+    json_out = tmp_path / "findings.json"
+
+    code = main(
+        [
+            "review",
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--config",
+            str(config),
+            "--json-out",
+            str(json_out),
+            "--fail-on-severity",
+            "high",
+        ]
+    )
+    assert code == 1
+    assert len(_review_posted()) == 1
+    assert "Model finding." in capsys.readouterr().out
+    assert json_out.is_file()
+    findings = json.loads(json_out.read_text(encoding="utf-8"))
+    assert any(f["message"] == "Model finding." for f in findings)
+
+
+def test_review_dry_run_fail_on_severity_exits_1_without_posting(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """In --dry-run the gate still applies, but nothing is posted."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    config = _write_config(tmp_path, model_server)
+
+    code = main(
+        [
+            "review",
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--config",
+            str(config),
+            "--dry-run",
+            "--fail-on-severity",
+            "high",
+        ]
+    )
+    assert code == 1
+    assert _review_posted() == []
+    assert "Model finding." in capsys.readouterr().out
+
+
+# --- Idempotent summary comment (v0.2.0) ------------------------------------
+
+
+def test_review_inline_mode_creates_summary_comment_and_brief_review(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """Inline mode: the summary goes to a new issue comment, and the
+    review carries a brief body plus the inline comments — not the full
+    summary table again."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    config = _write_config(tmp_path, model_server)
+
+    code = main(["review", "--repo", "o/r", "--pr", "1", "--config", str(config)])
+    assert code == 0
+    created = _issue_comments_created()
+    assert len(created) == 1
+    comment_body = json.loads(created[0]["body"])["body"]
+    assert "Model finding." in comment_body
+    assert SUMMARY_MARKER in comment_body
+    posted = _review_posted()
+    assert len(posted) == 1
+    review = json.loads(posted[0]["body"])
+    assert review["event"] == "COMMENT"
+    # Brief body: no findings table in the review itself.
+    assert "Model finding." not in review["body"]
+    assert "inline comment" in review["body"]
+    assert len(review["comments"]) == 1
+    assert review["comments"][0]["path"] == "src/a.py"
+
+
+def test_review_updates_existing_summary_comment(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """When a comment with the marker already exists, it is updated in
+    place instead of creating a second summary comment."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    FakeGitHubHandler.issue_comments.append(
+        {"id": 7, "body": f"{SUMMARY_MARKER}\nOld summary."}
+    )
+    config = _write_config(tmp_path, model_server)
+
+    code = main(["review", "--repo", "o/r", "--pr", "1", "--config", str(config)])
+    assert code == 0
+    assert _issue_comments_created() == []
+    updated = _issue_comments_updated()
+    assert len(updated) == 1
+    assert updated[0]["path"] == "/repos/o/r/issues/comments/7"
+    new_body = json.loads(updated[0]["body"])["body"]
+    assert "Model finding." in new_body
+    assert SUMMARY_MARKER in new_body
+    # The inline review is still posted.
+    assert len(_review_posted()) == 1
+
+
+def test_review_summary_comment_pagination(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """The marker comment is found even when it sits on page 2 of the
+    issue comments (100 filler comments first)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    FakeGitHubHandler.issue_comments.extend(
+        {"id": i, "body": f"comment {i}"} for i in range(100)
+    )
+    FakeGitHubHandler.issue_comments.append(
+        {"id": 101, "body": f"{SUMMARY_MARKER}\nOld summary."}
+    )
+    config = _write_config(tmp_path, model_server)
+
+    code = main(["review", "--repo", "o/r", "--pr", "1", "--config", str(config)])
+    assert code == 0
+    listed = _issue_comments_listed()
+    assert [r["path"] for r in listed] == [
+        "/repos/o/r/issues/1/comments?per_page=100&page=1",
+        "/repos/o/r/issues/1/comments?per_page=100&page=2",
+    ]
+    assert _issue_comments_created() == []
+    updated = _issue_comments_updated()
+    assert len(updated) == 1
+    assert updated[0]["path"] == "/repos/o/r/issues/comments/101"
+
+
+class _StubClient:
+    """Records GitHub calls for direct _post_review tests."""
+
+    def __init__(self):
+        self.created: list[str] = []
+        self.updated: list[tuple[int, str]] = []
+        self.reviews: list[tuple[str, list]] = []
+        self.listed_comments: list[dict] = []
+
+    def list_issue_comments(self, owner, repo, number):
+        return self.listed_comments
+
+    def create_issue_comment(self, owner, repo, number, body):
+        self.created.append(body)
+        return {"id": 1, "body": body}
+
+    def update_issue_comment(self, owner, repo, comment_id, body):
+        self.updated.append((comment_id, body))
+        return {"id": comment_id, "body": body}
+
+    def create_review(self, owner, repo, number, body, comments, event="COMMENT"):
+        self.reviews.append((body, comments))
+        return {"id": 99, "state": "COMMENTED"}
+
+
+def test_post_review_skips_review_when_no_inline_comments():
+    """Findings that map to no diff line still get a summary comment,
+    but no (empty) review is posted."""
+    client = _StubClient()
+    findings = [
+        Finding("high", "bug", "src/a.py", None, "File-level finding."),
+    ]
+    summary = "Summary text."
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), summary, findings, files)
+    assert client.created == ["Summary text."]
+    assert client.updated == []
+    assert client.reviews == []
+
+
+def test_post_review_summary_mode_never_posts_review():
+    """In summary mode even mappable findings produce no review call."""
+    client = _StubClient()
+    findings = [
+        Finding("high", "bug", "src/a.py", 2, "Line finding."),
+    ]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(
+        client, "o", "r", 1, Config(mode="summary"), "Summary.", findings, files
+    )
+    assert client.created == ["Summary."]
+    assert client.reviews == []
+
+
+def test_post_review_zero_findings_still_updates_summary():
+    """A clean re-push updates the summary comment to 'No findings'
+    instead of leaving a stale findings table behind."""
+    client = _StubClient()
+    client.listed_comments = [{"id": 5, "body": f"{SUMMARY_MARKER}\nOld table."}]
+    _post_review(client, "o", "r", 1, Config(), "No findings.", [], [])
+    assert client.created == []
+    assert client.updated == [(5, "No findings.")]
+    assert client.reviews == []
+
+
+# --- SARIF output (v0.2.0) ----------------------------------------------------
+
+
+def test_review_diff_sarif_out_writes_valid_sarif(tmp_path, monkeypatch, capsys):
+    """--sarif-out writes a valid SARIF 2.1.0 document for the findings."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    sarif_out = tmp_path / "report.sarif"
+
+    code = main(["review-diff", "--file", str(patch), "--sarif-out", str(sarif_out)])
+    assert code == 0
+    parsed = json.loads(sarif_out.read_text(encoding="utf-8"))
+    assert parsed["version"] == "2.1.0"
+    results = parsed["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["ruleId"] == "dangerous-eval"
+    assert results[0]["level"] == "error"
+    location = results[0]["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "a.py"
+    assert location["region"]["startLine"] == 2
+
+
+def test_review_diff_sarif_out_written_before_gate_exit_1(
+    tmp_path, monkeypatch, capsys
+):
+    """The SARIF file is written even when the run then exits 1."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    sarif_out = tmp_path / "report.sarif"
+
+    code = main(
+        [
+            "review-diff",
+            "--file",
+            str(patch),
+            "--sarif-out",
+            str(sarif_out),
+            "--fail-on-severity",
+            "high",
+        ]
+    )
+    assert code == 1
+    assert sarif_out.is_file()
+    parsed = json.loads(sarif_out.read_text(encoding="utf-8"))
+    assert len(parsed["runs"][0]["results"]) == 1
+
+
+def test_review_diff_sarif_out_empty_findings(tmp_path, monkeypatch, capsys):
+    """A clean diff still writes a valid SARIF document with no results."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = tmp_path / "clean.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    sarif_out = tmp_path / "report.sarif"
+
+    code = main(["review-diff", "--file", str(patch), "--sarif-out", str(sarif_out)])
+    assert code == 0
+    parsed = json.loads(sarif_out.read_text(encoding="utf-8"))
+    assert parsed["runs"][0]["results"] == []
+    assert parsed["runs"][0]["tool"]["driver"]["rules"] == []
+
+
+def test_review_diff_sarif_out_unwritable_exits_2(tmp_path, monkeypatch, capsys):
+    """An unwritable SARIF path is a usage error (exit 2)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+
+    code = main(
+        [
+            "review-diff",
+            "--file",
+            str(patch),
+            "--sarif-out",
+            str(tmp_path / "no-such-dir" / "report.sarif"),
+        ]
+    )
+    assert code == 2
+    assert "error" in capsys.readouterr().err
+
+
+def test_review_sarif_out_written(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """--sarif-out also works on the review subcommand."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    config = _write_config(tmp_path, model_server)
+    sarif_out = tmp_path / "report.sarif"
+
+    code = main(
+        [
+            "review",
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--config",
+            str(config),
+            "--sarif-out",
+            str(sarif_out),
+        ]
+    )
+    assert code == 0
+    parsed = json.loads(sarif_out.read_text(encoding="utf-8"))
+    results = parsed["runs"][0]["results"]
+    # The reviewer always tags AI findings with the "ai-review" rule.
+    assert any(r["ruleId"] == "ai-review" for r in results)
