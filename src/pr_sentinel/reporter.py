@@ -128,6 +128,51 @@ SARIF_LEVELS = {
 SARIF_INFORMATION_URI = "https://github.com/vadofespanili-cyber/pr-sentinel"
 
 
+def _sarif_rule(rule_id: str, finding: Finding) -> dict[str, Any]:
+    """One SARIF rule entry for ``rule_id``.
+
+    Specific static-check rules (one slug per check, constant message)
+    keep the first finding's message as their description. Shared rule
+    ids get a generic description instead: copying the first finding's
+    message into the rule would misdescribe every other finding under
+    the same rule. Shared ids are ``ai-review`` (one rule for every AI
+    finding — see ``reviewer.REVIEWER_RULE``) and the
+    ``pr-sentinel-<category>`` fallbacks for findings without a rule.
+    """
+    if rule_id == "ai-review":
+        short = "AI review finding"
+        full = (
+            "A finding reported by the pr-sentinel AI reviewer. "
+            "See each result's message for the details."
+        )
+    elif rule_id.startswith("pr-sentinel-"):
+        short = f"pr-sentinel {finding.category} finding"
+        full = (
+            f"A {finding.category} finding reported by pr-sentinel. "
+            "See each result's message for the details."
+        )
+    else:
+        short = finding.message
+        full = finding.suggestion or finding.message
+    return {
+        "id": rule_id,
+        "name": rule_id,
+        "shortDescription": {"text": short},
+        "fullDescription": {"text": full},
+        "defaultConfiguration": {
+            "level": SARIF_LEVELS.get(finding.severity, "warning")
+        },
+    }
+
+
+def _normalize_sarif_uri(path: str) -> str:
+    """SARIF artifact URIs use forward slashes and no leading ``./``."""
+    uri = path.replace("\\", "/")
+    while uri.startswith("./"):
+        uri = uri[2:]
+    return uri
+
+
 def findings_to_sarif(findings: list[Finding], version: str = __version__) -> str:
     """Serialize findings as SARIF 2.1.0 JSON (stdlib ``json`` only).
 
@@ -143,20 +188,18 @@ def findings_to_sarif(findings: list[Finding], version: str = __version__) -> st
     for finding in findings:
         rule_id = finding.rule or f"pr-sentinel-{finding.category}"
         if rule_id not in rules:
-            rules[rule_id] = {
-                "id": rule_id,
-                "name": rule_id,
-                "shortDescription": {"text": finding.message},
-                "fullDescription": {"text": finding.suggestion or finding.message},
-                "defaultConfiguration": {"level": SARIF_LEVELS[finding.severity]},
-            }
-        physical_location: dict[str, Any] = {"artifactLocation": {"uri": finding.file}}
-        if finding.line is not None:
+            rules[rule_id] = _sarif_rule(rule_id, finding)
+        physical_location: dict[str, Any] = {
+            "artifactLocation": {"uri": _normalize_sarif_uri(finding.file)}
+        }
+        # SARIF 2.1.0 requires startLine >= 1; a missing or invalid
+        # line omits the region (the artifact location is still kept).
+        if finding.line is not None and finding.line >= 1:
             physical_location["region"] = {"startLine": finding.line}
         results.append(
             {
                 "ruleId": rule_id,
-                "level": SARIF_LEVELS[finding.severity],
+                "level": SARIF_LEVELS.get(finding.severity, "warning"),
                 "message": {"text": finding.message},
                 "locations": [{"physicalLocation": physical_location}],
             }
