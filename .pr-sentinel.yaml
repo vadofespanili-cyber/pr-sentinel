@@ -1,0 +1,5 @@
+# pr-sentinel config: AI review via the coarena Responses-compatible provider.
+# The API key is NOT stored here — it comes from the PR_SENTINEL_API_KEY
+# repository secret (Settings → Secrets and variables → Actions).
+model: deepseek-v4-1-flash-1017
+api_base_url: https://coarena.ai/api/v1
