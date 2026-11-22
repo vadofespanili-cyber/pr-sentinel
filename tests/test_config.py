@@ -165,3 +165,29 @@ def test_api_key_from_env():
     assert api_key_from_env({}) is None
     assert api_key_from_env({"PR_SENTINEL_API_KEY": "sk-fake-test"}) == "sk-fake-test"
     assert api_key_from_env({"PR_SENTINEL_API_KEY": ""}) is None
+
+
+# --- fail_on_severity (v0.2.0) ----------------------------------------------
+
+
+def test_fail_on_severity_default_is_none():
+    assert Config().fail_on_severity is None
+    assert parse_config_text("").fail_on_severity is None
+
+
+def test_fail_on_severity_valid_values():
+    for value in ("critical", "high", "medium", "low"):
+        config = parse_config_text(f"fail_on_severity: {value}\n")
+        assert config.fail_on_severity == value
+
+
+def test_fail_on_severity_none_spelling_is_normalized():
+    assert parse_config_text("fail_on_severity: none\n").fail_on_severity is None
+    assert Config(fail_on_severity="none").fail_on_severity is None
+
+
+def test_fail_on_severity_invalid_value():
+    with pytest.raises(ConfigError, match="fail_on_severity"):
+        parse_config_text("fail_on_severity: urgent\n")
+    with pytest.raises(ConfigError, match="fail_on_severity"):
+        parse_config_text("fail_on_severity: 3\n")
