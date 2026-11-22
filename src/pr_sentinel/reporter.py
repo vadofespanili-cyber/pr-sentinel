@@ -8,17 +8,29 @@ from collections import Counter
 from .diff import DiffFile
 from .findings import SEVERITIES, Finding
 
-_NOTE = (
+_AI_NOTE = (
     "> **Note:** These findings are AI-generated suggestions. "
+    "Please verify them before acting on them."
+)
+_STATIC_NOTE = (
+    "> **Note:** These findings are from deterministic static checks. "
     "Please verify them before acting on them."
 )
 _FOOTER = "---\nReviewed by pr-sentinel"
 
 
 def build_summary(
-    findings: list[Finding], pr_title: str = "", pr_number: int | None = None
+    findings: list[Finding],
+    pr_title: str = "",
+    pr_number: int | None = None,
+    ai_used: bool = True,
 ) -> str:
-    """Render the review summary as Markdown."""
+    """Render the review summary as Markdown.
+
+    ``ai_used`` says whether the AI reviewer actually ran: the note under
+    the table names the source of the findings, so a static-only review
+    is never presented as AI output.
+    """
     if pr_number is not None:
         title = f"# pr-sentinel review — PR #{pr_number}"
         if pr_title:
@@ -51,33 +63,41 @@ def build_summary(
             f"| {finding.severity} | {_cell(finding.file)} | {line} "
             f"| {_cell(finding.message)} |"
         )
-    lines.extend(["", _NOTE, "", _FOOTER])
+    lines.extend(["", _AI_NOTE if ai_used else _STATIC_NOTE, "", _FOOTER])
     return "\n".join(lines) + "\n"
 
 
 def build_inline_comments(
     findings: list[Finding], diff_files: list[DiffFile]
-) -> list[dict]:
+) -> list[dict[str, str | int]]:
     """Turn findings into GitHub inline review comments.
 
-    Only findings on an added line that exists in the diff get a comment;
-    the rest are skipped (they still appear in the summary).
+    Only findings on a line that exists in the diff get a comment (added
+    and context lines both exist in the new version); the rest are
+    skipped (they still appear in the summary). Comments use the modern
+    ``line`` + ``side`` fields, not the legacy ``position`` field.
     """
     by_path = {diff_file.path: diff_file for diff_file in diff_files}
-    comments: list[dict] = []
+    comments: list[dict[str, str | int]] = []
     for finding in findings:
         if finding.line is None:
             continue
         diff_file = by_path.get(finding.file)
         if diff_file is None:
             continue
-        position = diff_file.new_line_position(finding.line)
-        if position is None:
+        if diff_file.new_line_position(finding.line) is None:
             continue
         body = f"**{finding.severity} · {finding.category}**\n\n{finding.message}"
         if finding.suggestion:
             body += f"\n\n**Suggestion:** {finding.suggestion}"
-        comments.append({"path": finding.file, "position": position, "body": body})
+        comments.append(
+            {
+                "path": finding.file,
+                "line": finding.line,
+                "side": "RIGHT",
+                "body": body,
+            }
+        )
     return comments
 
 
