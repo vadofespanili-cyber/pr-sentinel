@@ -7,6 +7,7 @@ import fnmatch
 import sys
 from dataclasses import fields
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .config import (
@@ -17,9 +18,15 @@ from .config import (
     load_config,
 )
 from .diff import DiffFile, parse_diff
-from .findings import Finding, filter_findings, sort_findings
+from .findings import SEVERITY_RANK, Finding, filter_findings, sort_findings
 from .github_client import GitHubClient, GitHubError
-from .reporter import build_inline_comments, build_summary, findings_to_json
+from .reporter import (
+    SUMMARY_MARKER,
+    build_inline_comments,
+    build_summary,
+    findings_to_json,
+    findings_to_sarif,
+)
 
 # The reviewer and static checks are built by other parts of the project.
 # They are imported lazily so `check-config` (and static-only runs) keep
@@ -46,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Do not post the review to GitHub."
     )
     review.add_argument("--json-out", help="Write findings as JSON to this path.")
+    review.add_argument(
+        "--sarif-out", help="Write findings as SARIF 2.1.0 to this path."
+    )
+    review.add_argument(
+        "--fail-on-severity",
+        choices=["none", "critical", "high", "medium", "low"],
+        default=None,
+        help="Exit 1 if any reported finding meets this severity "
+        "(overrides the config file; default: no gate).",
+    )
 
     review_diff = subparsers.add_parser(
         "review-diff", help="Review a local patch file (no GitHub needed)."
@@ -53,6 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
     review_diff.add_argument("--file", required=True, help="Path to a .patch file.")
     review_diff.add_argument("--config", help="Path to a config file.")
     review_diff.add_argument("--json-out", help="Write findings as JSON to this path.")
+    review_diff.add_argument(
+        "--sarif-out", help="Write findings as SARIF 2.1.0 to this path."
+    )
+    review_diff.add_argument(
+        "--fail-on-severity",
+        choices=["none", "critical", "high", "medium", "low"],
+        default=None,
+        help="Exit 1 if any reported finding meets this severity "
+        "(overrides the config file; default: no gate).",
+    )
 
     check_config = subparsers.add_parser(
         "check-config", help="Validate a config file and print its fields."
@@ -97,7 +124,13 @@ def _cmd_review_diff(args: argparse.Namespace) -> int:
         print(f"error: cannot read diff file: {exc}", file=sys.stderr)
         return 2
     return _run_and_report(
-        config, diff_text, pr_title="", pr_number=None, json_out=args.json_out
+        config,
+        diff_text,
+        pr_title="",
+        pr_number=None,
+        json_out=args.json_out,
+        sarif_out=args.sarif_out,
+        fail_on_severity=_effective_fail_on_severity(config, args),
     )
 
 
@@ -128,26 +161,67 @@ def _cmd_review(args: argparse.Namespace) -> int:
         config, diff_text, pr_title=title, pr_number=args.pr
     )
     if not args.dry_run:
-        if config.mode == "summary":
-            inline: list[dict[str, str | int]] = []
-        else:
-            inline = build_inline_comments(findings, files)[
-                : config.max_inline_comments
-            ]
         try:
-            client.create_review(
-                owner,
-                repo,
-                args.pr,
-                body=summary,
-                comments=inline,
-                event="COMMENT",
-            )
+            _post_review(client, owner, repo, args.pr, config, summary, findings, files)
         except GitHubError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 3
     print(summary)
-    return _write_json(findings, args.json_out)
+    return _finish_outputs(
+        findings,
+        args.json_out,
+        _effective_fail_on_severity(config, args),
+        sarif_out=args.sarif_out,
+    )
+
+
+def _post_review(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    config: Config,
+    summary: str,
+    findings: list[Finding],
+    files: list[DiffFile],
+) -> None:
+    """Post the summary as an idempotent issue comment, then (in inline
+    mode) any inline comments as a review.
+
+    The summary comment is found by its hidden marker and updated in
+    place, so re-pushes never spam the PR with a new summary each time.
+    Inline comments go through create_review only when there is at least
+    one to post, with a brief body — the full findings table lives in the
+    summary comment, not in every review.
+    """
+    existing = _find_summary_comment(client, owner, repo, pr_number)
+    if existing is not None:
+        client.update_issue_comment(owner, repo, existing["id"], summary)
+    else:
+        client.create_issue_comment(owner, repo, pr_number, summary)
+    if config.mode != "inline":
+        return
+    inline = build_inline_comments(findings, files)[: config.max_inline_comments]
+    if not inline:
+        return
+    body = (
+        f"pr-sentinel posted {len(inline)} inline comment(s) below; "
+        "the full findings table is in the summary comment."
+    )
+    client.create_review(
+        owner, repo, pr_number, body=body, comments=inline, event="COMMENT"
+    )
+
+
+def _find_summary_comment(
+    client: GitHubClient, owner: str, repo: str, pr_number: int
+) -> dict[str, Any] | None:
+    """The existing summary comment, if any, found by its hidden marker."""
+    for comment in client.list_issue_comments(owner, repo, pr_number):
+        body = comment.get("body")
+        if isinstance(body, str) and SUMMARY_MARKER in body:
+            return comment
+    return None
 
 
 def _run_and_report(
@@ -156,12 +230,68 @@ def _run_and_report(
     pr_title: str,
     pr_number: int | None,
     json_out: str | None,
+    fail_on_severity: str | None = None,
+    sarif_out: str | None = None,
 ) -> int:
     summary, findings, _files = _prepare_review(
         config, diff_text, pr_title=pr_title, pr_number=pr_number
     )
     print(summary)
-    return _write_json(findings, json_out)
+    return _finish_outputs(findings, json_out, fail_on_severity, sarif_out=sarif_out)
+
+
+def _effective_fail_on_severity(config: Config, args: argparse.Namespace) -> str | None:
+    """The CI gate severity: the CLI flag wins over the config file.
+
+    ``"none"`` (from either source) means "no gate"; the config value is
+    already normalized by ``Config.__post_init__``.
+    """
+    raw = getattr(args, "fail_on_severity", None)
+    if raw is not None:
+        return None if raw == "none" else raw
+    return config.fail_on_severity
+
+
+def _meets_gate(findings: list[Finding], fail_on_severity: str) -> bool:
+    """True when a reported finding meets or exceeds the gate severity."""
+    threshold_rank = SEVERITY_RANK[fail_on_severity]
+    return any(
+        SEVERITY_RANK[finding.severity] <= threshold_rank for finding in findings
+    )
+
+
+def _finish_outputs(
+    findings: list[Finding],
+    json_out: str | None,
+    fail_on_severity: str | None,
+    sarif_out: str | None = None,
+) -> int:
+    """Write outputs, then apply the CI gate — in that order.
+
+    The gate is evaluated last on purpose: when a run fails the gate
+    (exit 1), the review has already been posted and every output file
+    already written, so CI still has the full report to look at.
+    """
+    code = _write_json(findings, json_out)
+    if code != 0:
+        return code
+    code = _write_sarif(findings, sarif_out)
+    if code != 0:
+        return code
+    if fail_on_severity is not None and _meets_gate(findings, fail_on_severity):
+        count = sum(
+            1
+            for finding in findings
+            if SEVERITY_RANK[finding.severity] <= SEVERITY_RANK[fail_on_severity]
+        )
+        noun = "finding" if count == 1 else "findings"
+        print(
+            f"error: fail_on_severity={fail_on_severity}: {count} {noun} "
+            "meet or exceed the threshold",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def _prepare_review(
@@ -335,5 +465,16 @@ def _write_json(findings: list[Finding], json_out: str | None) -> int:
         Path(json_out).write_text(findings_to_json(findings), encoding="utf-8")
     except OSError as exc:
         print(f"error: cannot write JSON output: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _write_sarif(findings: list[Finding], sarif_out: str | None) -> int:
+    if sarif_out is None:
+        return 0
+    try:
+        Path(sarif_out).write_text(findings_to_sarif(findings), encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot write SARIF output: {exc}", file=sys.stderr)
         return 2
     return 0
