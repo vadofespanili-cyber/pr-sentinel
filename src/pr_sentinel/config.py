@@ -18,6 +18,7 @@ CONFIG_FILENAMES = (".pr-sentinel.yml", ".pr-sentinel.yaml")
 KNOWN_KEYS = {
     "model",
     "severity_threshold",
+    "fail_on_severity",
     "ignore_paths",
     "max_files",
     "max_diff_chars",
@@ -39,12 +40,19 @@ class ConfigError(ValueError):
 class Config:
     model: str = "gpt-5"
     severity_threshold: str = "medium"
+    fail_on_severity: str | None = None
     ignore_paths: list[str] = field(default_factory=list)
     max_files: int = 50
     max_diff_chars: int = 100_000
     mode: str = "inline"
     max_inline_comments: int = 20
     api_base_url: str = DEFAULT_API_BASE_URL
+
+    def __post_init__(self) -> None:
+        # "none" is a user-friendly spelling of "no gate"; normalize it
+        # so the rest of the code only ever sees None or a severity.
+        if self.fail_on_severity == "none":
+            self.fail_on_severity = None
 
     def validate(self) -> None:
         if not isinstance(self.model, str) or not self.model:
@@ -53,6 +61,14 @@ class Config:
             raise ConfigError(
                 f"severity_threshold must be one of {list(SEVERITIES)}, "
                 f"got {self.severity_threshold!r}"
+            )
+        if self.fail_on_severity is not None and (
+            not isinstance(self.fail_on_severity, str)
+            or self.fail_on_severity not in SEVERITIES
+        ):
+            raise ConfigError(
+                "fail_on_severity must be one of "
+                f"{['none', *SEVERITIES]}, got {self.fail_on_severity!r}"
             )
         if self.mode not in MODES:
             raise ConfigError(f"mode must be one of {list(MODES)}, got {self.mode!r}")
