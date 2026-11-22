@@ -4,19 +4,33 @@ set -e
 
 PR_NUMBER="${INPUT_PR_NUMBER:-}"
 if [ -z "$PR_NUMBER" ] && [ -n "$GITHUB_EVENT_PATH" ]; then
-  PR_NUMBER=$(python3 -c "import json,os; print(json.load(open(os.environ['GITHUB_EVENT_PATH'])).get('pull_request', {}).get('number', ''))")
+  PR_NUMBER=$(python3 -c "import json,os; print((json.load(open(os.environ['GITHUB_EVENT_PATH'])).get('pull_request') or {}).get('number', ''))")
 fi
 
 if [ -z "$PR_NUMBER" ]; then
-  echo "error: no pull request number (set the pr-number input or run on a pull_request event)" >&2
+  echo "error: no pull request number (set the pr_number input or run on a pull_request event)" >&2
   exit 2
 fi
 
-export GITHUB_TOKEN="${INPUT_GITHUB_TOKEN:-$GITHUB_TOKEN}"
-export PR_SENTINEL_API_KEY="${INPUT_API_KEY:-$PR_SENTINEL_API_KEY}"
+# Only export a token when it is non-empty: an empty GITHUB_TOKEN would
+# pass the CLI's token check and fail later with a confusing 401 from
+# GitHub, and an empty API key would be sent as "Bearer " to the model.
+if [ -n "${INPUT_GITHUB_TOKEN:-}" ]; then
+  export GITHUB_TOKEN="${INPUT_GITHUB_TOKEN}"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  export GITHUB_TOKEN
+fi
+if [ -n "${INPUT_API_KEY:-}" ]; then
+  export PR_SENTINEL_API_KEY="${INPUT_API_KEY}"
+elif [ -n "${PR_SENTINEL_API_KEY:-}" ]; then
+  export PR_SENTINEL_API_KEY
+fi
+
+# The repository input defaults to the repo that triggered the run.
+REPO="${INPUT_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
 
 if [ -n "${INPUT_CONFIG_PATH:-}" ]; then
-  exec pr-sentinel review --repo "${INPUT_REPOSITORY}" --pr "$PR_NUMBER" --config "${INPUT_CONFIG_PATH}"
+  exec pr-sentinel review --repo "$REPO" --pr "$PR_NUMBER" --config "${INPUT_CONFIG_PATH}"
 else
-  exec pr-sentinel review --repo "${INPUT_REPOSITORY}" --pr "$PR_NUMBER"
+  exec pr-sentinel review --repo "$REPO" --pr "$PR_NUMBER"
 fi
