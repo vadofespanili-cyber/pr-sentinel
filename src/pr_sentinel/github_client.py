@@ -108,6 +108,53 @@ class GitHubClient:
             ),
         )
 
+    def list_issue_comments(
+        self, owner: str, repo: str, number: int
+    ) -> list[dict[str, Any]]:
+        """List all comments on a PR's backing issue, following pagination."""
+        comments: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            page_comments = cast(
+                list[dict[str, Any]],
+                self._request(
+                    "GET",
+                    f"/repos/{_quote(owner)}/{_quote(repo)}/issues/{number}"
+                    f"/comments?per_page=100&page={page}",
+                ),
+            )
+            comments.extend(page_comments)
+            if len(page_comments) < 100:
+                break
+            page += 1
+        return comments
+
+    def create_issue_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> dict[str, Any]:
+        """Post a comment on a PR's backing issue."""
+        return cast(
+            dict[str, Any],
+            self._request(
+                "POST",
+                f"/repos/{_quote(owner)}/{_quote(repo)}/issues/{number}/comments",
+                body={"body": body},
+            ),
+        )
+
+    def update_issue_comment(
+        self, owner: str, repo: str, comment_id: int, body: str
+    ) -> dict[str, Any]:
+        """Update an existing issue comment in place."""
+        return cast(
+            dict[str, Any],
+            self._request(
+                "PATCH",
+                f"/repos/{_quote(owner)}/{_quote(repo)}/issues/comments/{comment_id}",
+                body={"body": body},
+            ),
+        )
+
     def create_review(
         self,
         owner: str,
