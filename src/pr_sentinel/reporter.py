@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from typing import Any
 
+from . import __version__
 from .diff import DiffFile
 from .findings import SEVERITIES, Finding
+
+# Hidden marker in the summary comment: the CLI finds the existing
+# summary by this marker and updates it in place, so re-pushes never
+# spam the PR with a new summary comment each time.
+SUMMARY_MARKER = "<!-- pr-sentinel:summary -->"
 
 _AI_NOTE = (
     "> **Note:** These findings are AI-generated suggestions. "
@@ -43,7 +50,7 @@ def build_summary(
     lines = [title, ""]
     if not findings:
         lines.append("No findings. Nothing to report — the changes look clean.")
-        lines.extend(["", _FOOTER])
+        lines.extend(["", _FOOTER, "", SUMMARY_MARKER])
         return "\n".join(lines) + "\n"
 
     counts = Counter(f.severity for f in findings)
@@ -63,7 +70,9 @@ def build_summary(
             f"| {finding.severity} | {_cell(finding.file)} | {line} "
             f"| {_cell(finding.message)} |"
         )
-    lines.extend(["", _AI_NOTE if ai_used else _STATIC_NOTE, "", _FOOTER])
+    lines.extend(
+        ["", _AI_NOTE if ai_used else _STATIC_NOTE, "", _FOOTER, "", SUMMARY_MARKER]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -104,6 +113,72 @@ def build_inline_comments(
 def findings_to_json(findings: list[Finding]) -> str:
     """Serialize findings as indented JSON."""
     return json.dumps([f.to_dict() for f in findings], indent=2)
+
+
+SARIF_SCHEMA = (
+    "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/"
+    "Schemata/sarif-schema-2.1.0.json"
+)
+SARIF_LEVELS = {
+    "critical": "error",
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+}
+SARIF_INFORMATION_URI = "https://github.com/vadofespanili-cyber/pr-sentinel"
+
+
+def findings_to_sarif(findings: list[Finding], version: str = __version__) -> str:
+    """Serialize findings as SARIF 2.1.0 JSON (stdlib ``json`` only).
+
+    Rule ids are the finding's stable ``rule`` slug — static checks use
+    one slug per check (e.g. ``leaked-openai-key``), the AI reviewer uses
+    ``ai-review`` — falling back to ``pr-sentinel-<category>`` when a
+    finding has no rule. Rules are deduplicated in first-seen order.
+    Messages never contain raw secret values: static-check messages are
+    fixed strings, and the AI reviewer is instructed not to echo secrets.
+    """
+    rules: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    for finding in findings:
+        rule_id = finding.rule or f"pr-sentinel-{finding.category}"
+        if rule_id not in rules:
+            rules[rule_id] = {
+                "id": rule_id,
+                "name": rule_id,
+                "shortDescription": {"text": finding.message},
+                "fullDescription": {"text": finding.suggestion or finding.message},
+                "defaultConfiguration": {"level": SARIF_LEVELS[finding.severity]},
+            }
+        physical_location: dict[str, Any] = {"artifactLocation": {"uri": finding.file}}
+        if finding.line is not None:
+            physical_location["region"] = {"startLine": finding.line}
+        results.append(
+            {
+                "ruleId": rule_id,
+                "level": SARIF_LEVELS[finding.severity],
+                "message": {"text": finding.message},
+                "locations": [{"physicalLocation": physical_location}],
+            }
+        )
+    sarif: dict[str, Any] = {
+        "$schema": SARIF_SCHEMA,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "pr-sentinel",
+                        "version": version,
+                        "informationUri": SARIF_INFORMATION_URI,
+                        "rules": list(rules.values()),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+    return json.dumps(sarif, indent=2)
 
 
 def _cell(text: str) -> str:
