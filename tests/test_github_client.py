@@ -75,6 +75,10 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {"number": 1, "title": "Test PR"})
             return
+        if parsed.path == "/user":
+            self._record()
+            self._send_json(200, {"login": "github-actions[bot]", "type": "Bot"})
+            return
         self._record()
         self._send_json(404, {"message": "Not Found"})
 
@@ -125,6 +129,16 @@ def test_get_pull(client):
     assert headers["x-github-api-version"] == "2022-11-28"
     assert headers["user-agent"] == f"pr-sentinel/{__version__}"
     assert headers["accept"] == "application/vnd.github+json"
+
+
+def test_get_authenticated_user_is_cached(client):
+    """GET /user is fetched once and cached on the client."""
+    first = client.get_authenticated_user()
+    assert first == {"login": "github-actions[bot]", "type": "Bot"}
+    second = client.get_authenticated_user()
+    assert second is first
+    user_requests = [r for r in FakeGitHubHandler.requests if r["path"] == "/user"]
+    assert len(user_requests) == 1
 
 
 def test_list_pull_files_pagination(client):
