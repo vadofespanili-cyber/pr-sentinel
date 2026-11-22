@@ -3,6 +3,14 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Bumped `actions/checkout` from v4 to v5 and `actions/setup-python`
+  from v5 to v6 in the CI and self-review workflows (removes the
+  Node.js 20 deprecation warnings).
+
 ## [0.2.0] - 2026-11-22
 
 ### Added
