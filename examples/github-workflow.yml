@@ -6,12 +6,18 @@ on:
 permissions:
   pull-requests: write
   contents: read
+  security-events: write  # needed to upload the SARIF report
 
 jobs:
   review:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.1.2
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.0
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
+          fail_on_severity: high
+          sarif_out: pr-sentinel.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: pr-sentinel.sarif

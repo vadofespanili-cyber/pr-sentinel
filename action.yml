@@ -23,6 +23,14 @@ inputs:
     description: "Path to the pr-sentinel config file"
     required: false
     default: ""
+  fail_on_severity:
+    description: "Fail the run (exit 1) if any reported finding meets this severity: none, critical, high, medium, low"
+    required: false
+    default: ""
+  sarif_out:
+    description: "Write findings as SARIF 2.1.0 to this path (relative to the workspace, e.g. pr-sentinel.sarif)"
+    required: false
+    default: ""
 
 runs:
   using: "docker"

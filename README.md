@@ -62,7 +62,9 @@ jobs:
 `PR_SENTINEL_API_KEY` must be a key for a Responses-compatible model
 provider. The action posts one summary comment and line-level comments on
 the pull request. It never merges, closes or changes code — it only
-comments.
+comments. The summary comment is updated in place when new commits are
+pushed (it carries a hidden marker), so re-pushes do not spam the PR
+with a new summary each time.
 
 A full example is in [examples/github-workflow.yml](examples/github-workflow.yml).
 
@@ -87,8 +89,11 @@ pr-sentinel check-config --config .pr-sentinel.yaml
 ```
 
 The CLI exits `0` on success, `2` on config or usage errors and `3` on
-API errors. Findings never change the exit code: a PR with findings still
-exits `0`, so the review never fails your build.
+API errors. By default, findings never change the exit code: a PR with
+findings still exits `0`, so the review never fails your build. Set
+`fail_on_severity` (or `--fail-on-severity`) to make findings at or
+above a severity fail the run with exit `1` — see
+[CI gate and SARIF](#ci-gate-and-sarif-output) below.
 
 ## Configuration
 
@@ -99,6 +104,7 @@ directory, or `--config PATH`. An example is in
 ```yaml
 model: gpt-5                 # model name sent to the Responses API
 severity_threshold: medium   # lowest severity to report: critical|high|medium|low
+fail_on_severity: high       # optional CI gate: exit 1 if a reported finding is this severe or worse (default: no gate; "none" also disables it)
 ignore_paths:                # fnmatch globs, e.g. "vendor/**", "*.min.js"
   - "docs/**"
 max_files: 50                # review at most this many files per PR
@@ -112,6 +118,7 @@ api_base_url: https://api.openai.com/v1
 | --- | --- |
 | `model` | `gpt-5` |
 | `severity_threshold` | `medium` |
+| `fail_on_severity` | `None` (no gate) |
 | `ignore_paths` | `[]` |
 | `max_files` | `50` |
 | `max_diff_chars` | `100000` |
@@ -125,6 +132,59 @@ Environment variables:
 | --- | --- |
 | `PR_SENTINEL_API_KEY` | API key for the model provider (required for AI review; without it only static checks run) |
 | `GITHUB_TOKEN` | GitHub token with pull-request read/write access (required for `review`) |
+
+## CI gate and SARIF output
+
+### Failing the build on severe findings
+
+Set `fail_on_severity` in the config file, or pass
+`--fail-on-severity` to `review` / `review-diff` (the flag wins over
+the config file), or set the `fail_on_severity` Action input. Valid
+values: `critical`, `high`, `medium`, `low`; `none` (or leaving it
+unset) disables the gate. When the gate is on, the run exits `1` if any
+*reported* finding — after `severity_threshold` and `ignore_paths`
+filtering — meets or exceeds the threshold; otherwise it exits `0`.
+The review is always posted and `--json-out` / `--sarif-out` are always
+written before the gate exits `1`, so CI still has the full report.
+
+Note the interaction with `severity_threshold`: the gate only sees
+findings that were reported, so with the default threshold `medium` a
+`fail_on_severity: low` gate can never fire on low findings — lower
+`severity_threshold` too if you want low findings to fail the build.
+
+### SARIF output
+
+`--sarif-out PATH` (on both `review` and `review-diff`, or the
+`sarif_out` Action input) writes the findings as SARIF 2.1.0, so they
+show up in GitHub code scanning. Upload it in a later step:
+
+```yaml
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.0
+        with:
+          api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
+          sarif_out: pr-sentinel.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: pr-sentinel.sarif
+```
+
+The upload step needs the `security-events: write` permission. The
+SARIF file is written relative to the workspace, so the upload step can
+read it. Rule ids are the finding's stable rule slug (for example
+`leaked-openai-key`, or `ai-review` for AI findings); severities map to
+SARIF levels `error` (`critical`/`high`), `warning` (`medium`) and
+`note` (`low`). Finding messages never contain raw secret values.
+
+### The summary comment
+
+The summary is posted as a single issue comment carrying a hidden
+`<!-- pr-sentinel:summary -->` marker. When new commits are pushed,
+pr-sentinel finds that comment and updates it in place instead of
+posting another one. In `inline` mode the line comments are posted as
+a review only when there is at least one inline comment to post, with
+a brief body pointing at the summary comment. A review with no
+findings updates the summary comment to "No findings" instead of
+leaving a stale findings table behind.
 
 ## Example output
 
@@ -196,9 +256,6 @@ design decisions.
   retried up to 3 attempts with exponential backoff, honoring a
   Retry-After header; a persistent failure falls back to static checks
   only, with a warning.
-- **No CI gate on critical findings.** The exit code is always 0 on a
-  completed review, and the summary comment is not updated when new
-  commits are pushed. Both are planned for a later minor version.
 - **English prompts.** Review prompts and messages are in English in
   v0.1.0.
 

@@ -75,6 +75,10 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {"number": 1, "title": "Test PR"})
             return
+        if parsed.path == "/user":
+            self._record()
+            self._send_json(200, {"login": "github-actions[bot]", "type": "Bot"})
+            return
         self._record()
         self._send_json(404, {"message": "Not Found"})
 
@@ -125,6 +129,16 @@ def test_get_pull(client):
     assert headers["x-github-api-version"] == "2022-11-28"
     assert headers["user-agent"] == f"pr-sentinel/{__version__}"
     assert headers["accept"] == "application/vnd.github+json"
+
+
+def test_get_authenticated_user_is_cached(client):
+    """GET /user is fetched once and cached on the client."""
+    first = client.get_authenticated_user()
+    assert first == {"login": "github-actions[bot]", "type": "Bot"}
+    second = client.get_authenticated_user()
+    assert second is first
+    user_requests = [r for r in FakeGitHubHandler.requests if r["path"] == "/user"]
+    assert len(user_requests) == 1
 
 
 def test_list_pull_files_pagination(client):
@@ -221,6 +235,12 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         self._serve()
 
     def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+        self._serve()
+
+    def do_PATCH(self):
         length = int(self.headers.get("Content-Length", 0))
         if length:
             self.rfile.read(length)
@@ -367,3 +387,134 @@ def test_post_timeout_is_not_retried(monkeypatch, github_server):
             "o", "r", 1, ["x"]
         )
     assert len(calls) == 1
+
+
+# --- Issue comments (v0.2.0) ------------------------------------------------
+# The fake server in this file does not implement issue comments yet;
+# these tests use a small dedicated handler instead.
+
+
+class _IssueCommentsHandler(BaseHTTPRequestHandler):
+    """Fake API serving issue comments, paginated at 100 per page."""
+
+    requests: ClassVar[list[dict]] = []
+    comments: ClassVar[list[dict]] = []
+    protocol_version = "HTTP/1.1"
+
+    def _record(self, body: bytes = b"") -> None:
+        _IssueCommentsHandler.requests.append(
+            {"method": self.command, "path": self.path, "body": body}
+        )
+
+    def _send_json(self, status: int, payload: object) -> None:
+        data = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:
+        self._record()
+        parsed = urlparse(self.path)
+        if parsed.path == "/repos/o/r/issues/1/comments":
+            page = int(parse_qs(parsed.query).get("page", ["1"])[0])
+            start = (page - 1) * 100
+            self._send_json(200, _IssueCommentsHandler.comments[start : start + 100])
+            return
+        self._send_json(404, {"message": "Not Found"})
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        self._record(raw)
+        if self.path == "/repos/o/r/issues/1/comments":
+            self._send_json(200, {"id": 7, "body": json.loads(raw)["body"]})
+            return
+        self._send_json(404, {"message": "Not Found"})
+
+    def do_PATCH(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b""
+        self._record(raw)
+        if self.path.startswith("/repos/o/r/issues/comments/"):
+            comment_id = int(self.path.rsplit("/", 1)[-1])
+            self._send_json(200, {"id": comment_id, "body": json.loads(raw)["body"]})
+            return
+        self._send_json(404, {"message": "Not Found"})
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+
+@pytest.fixture()
+def issue_comments_server():
+    _IssueCommentsHandler.requests.clear()
+    _IssueCommentsHandler.comments.clear()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _IssueCommentsHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture()
+def issue_comments_client(issue_comments_server):
+    return GitHubClient(token="fake-token", base_url=issue_comments_server)
+
+
+def test_list_issue_comments_pagination(issue_comments_client):
+    _IssueCommentsHandler.comments.extend(
+        {"id": i, "body": f"c{i}"} for i in range(150)
+    )
+    comments = issue_comments_client.list_issue_comments("o", "r", 1)
+    assert len(comments) == 150
+    assert comments[0]["id"] == 0
+    assert comments[-1]["id"] == 149
+    pages = [r["path"] for r in _IssueCommentsHandler.requests if r["method"] == "GET"]
+    assert pages == [
+        "/repos/o/r/issues/1/comments?per_page=100&page=1",
+        "/repos/o/r/issues/1/comments?per_page=100&page=2",
+    ]
+
+
+def test_list_issue_comments_empty(issue_comments_client):
+    assert issue_comments_client.list_issue_comments("o", "r", 1) == []
+    assert len(_IssueCommentsHandler.requests) == 1
+
+
+def test_create_issue_comment_body(issue_comments_client):
+    result = issue_comments_client.create_issue_comment("o", "r", 1, "Hello.")
+    assert result == {"id": 7, "body": "Hello."}
+    request = _IssueCommentsHandler.requests[-1]
+    assert request["method"] == "POST"
+    assert request["path"] == "/repos/o/r/issues/1/comments"
+    assert json.loads(request["body"]) == {"body": "Hello."}
+
+
+def test_update_issue_comment_body(issue_comments_client):
+    result = issue_comments_client.update_issue_comment("o", "r", 42, "New text.")
+    assert result == {"id": 42, "body": "New text."}
+    request = _IssueCommentsHandler.requests[-1]
+    assert request["method"] == "PATCH"
+    assert request["path"] == "/repos/o/r/issues/comments/42"
+    assert json.loads(request["body"]) == {"body": "New text."}
+
+
+def test_patch_500_is_not_retried(scripted_server, monkeypatch):
+    """A 5xx on a PATCH must not be retried either: like POST, the
+    server may have applied the update and lost the response."""
+    import pr_sentinel.github_client as gc
+
+    delays = []
+    monkeypatch.setattr(gc, "_sleep", delays.append)
+    scripted_server.script = [(500, {}, '{"message": "boom"}')]
+    with pytest.raises(GitHubError) as excinfo:
+        _scripted_client(scripted_server).update_issue_comment("o", "r", 1, "x")
+    assert excinfo.value.status == 500
+    assert scripted_server.hits == 1
+    assert delays == []

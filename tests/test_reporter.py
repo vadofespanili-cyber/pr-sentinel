@@ -136,3 +136,221 @@ def test_findings_to_json_round_trips():
     parsed = json.loads(findings_to_json(findings))
     assert parsed == [f.to_dict() for f in findings]
     assert findings_to_json([]) == "[]"
+
+
+def test_summary_contains_hidden_marker():
+    """The summary carries the hidden marker used for idempotent
+    updates (v0.2.0), with and without findings."""
+    from pr_sentinel.reporter import SUMMARY_MARKER
+
+    assert SUMMARY_MARKER in build_summary(sample_findings(), pr_number=42)
+    assert SUMMARY_MARKER in build_summary([], pr_number=7)
+    # The marker is the last line, so it never leaks into the table.
+    summary = build_summary(sample_findings(), pr_number=42)
+    assert summary.rstrip("\n").splitlines()[-1] == SUMMARY_MARKER
+
+
+# --- SARIF 2.1.0 output (v0.2.0) --------------------------------------------
+
+
+def test_sarif_structure_and_severity_mapping():
+    from pr_sentinel import __version__
+    from pr_sentinel.reporter import findings_to_sarif
+
+    parsed = json.loads(findings_to_sarif(sample_findings()))
+    assert parsed["$schema"].endswith("sarif-schema-2.1.0.json")
+    assert parsed["version"] == "2.1.0"
+    run = parsed["runs"][0]
+    driver = run["tool"]["driver"]
+    assert driver["name"] == "pr-sentinel"
+    assert driver["version"] == __version__
+    assert driver["informationUri"].startswith("https://github.com/")
+    results = run["results"]
+    assert len(results) == 3
+    by_severity = {r["ruleId"]: r["level"] for r in results}
+    # critical/high -> error, medium -> warning, low -> note.
+    assert by_severity["unused-import"] == "error"  # high
+    assert by_severity["pr-sentinel-style"] == "note"  # low, no rule
+    assert by_severity["pr-sentinel-security"] == "error"  # critical, no rule
+    medium = Finding("medium", "bug", "src/a.py", 1, "Medium one.")
+    assert (
+        json.loads(findings_to_sarif([medium]))["runs"][0]["results"][0]["level"]
+        == "warning"
+    )
+
+
+def test_sarif_rules_are_deduplicated():
+    from pr_sentinel.reporter import findings_to_sarif
+
+    findings = [
+        Finding("high", "security", "a.py", 1, "First eval.", rule="dangerous-eval"),
+        Finding("high", "security", "b.py", 2, "Second eval.", rule="dangerous-eval"),
+        Finding("low", "style", "a.py", 3, "Style one."),
+    ]
+    parsed = json.loads(findings_to_sarif(findings))
+    rules = parsed["runs"][0]["tool"]["driver"]["rules"]
+    assert [r["id"] for r in rules] == ["dangerous-eval", "pr-sentinel-style"]
+    assert rules[0]["shortDescription"]["text"] == "First eval."
+    assert rules[0]["defaultConfiguration"]["level"] == "error"
+
+
+def test_sarif_locations_and_missing_line():
+    from pr_sentinel.reporter import findings_to_sarif
+
+    parsed = json.loads(findings_to_sarif(sample_findings()))
+    results = parsed["runs"][0]["results"]
+    with_line = next(r for r in results if r["ruleId"] == "unused-import")
+    location = with_line["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "src/a.py"
+    assert location["region"]["startLine"] == 2
+    no_line = next(r for r in results if r["ruleId"] == "pr-sentinel-security")
+    location = no_line["locations"][0]["physicalLocation"]
+    assert location["artifactLocation"]["uri"] == "src/b.py"
+    assert "region" not in location
+
+
+def test_sarif_empty_findings():
+    from pr_sentinel.reporter import findings_to_sarif
+
+    parsed = json.loads(findings_to_sarif([]))
+    run = parsed["runs"][0]
+    assert run["results"] == []
+    assert run["tool"]["driver"]["rules"] == []
+    assert parsed["version"] == "2.1.0"
+
+
+def test_sarif_line_zero_or_negative_omits_region():
+    """SARIF requires startLine >= 1: a missing or invalid line omits
+    the region (the artifact location is still kept). Finding normally
+    rejects line < 1, so the invalid lines are set after construction
+    to exercise the defensive path."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    zero = Finding("high", "bug", "src/a.py", 5, "Zero line.", rule="some-rule")
+    zero.line = 0
+    negative = Finding("high", "bug", "src/a.py", 5, "Negative line.")
+    negative.line = -3
+    parsed = json.loads(findings_to_sarif([zero, negative]))
+    results = parsed["runs"][0]["results"]
+    assert len(results) == 2
+    for result in results:
+        location = result["locations"][0]["physicalLocation"]
+        assert location["artifactLocation"]["uri"] == "src/a.py"
+        assert "region" not in location
+
+
+def test_sarif_uri_normalization():
+    """Artifact URIs use forward slashes and no leading ./ — Windows
+    and relative paths are normalized."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    findings = [
+        Finding("high", "bug", ".\\foo\\bar.py", 1, "Windows path."),
+        Finding("high", "bug", "./src/x.py", 2, "Relative path."),
+        Finding("high", "bug", "src/a.py", 3, "Plain path."),
+    ]
+    parsed = json.loads(findings_to_sarif(findings))
+    uris = [
+        r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        for r in parsed["runs"][0]["results"]
+    ]
+    assert uris == ["foo/bar.py", "src/x.py", "src/a.py"]
+
+
+def test_sarif_shared_rules_have_generic_descriptions():
+    """Shared rule ids get a generic description, not the first
+    finding's message: one rule covers many different findings."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    findings = [
+        Finding(
+            "high",
+            "bug",
+            "a.py",
+            1,
+            "First AI finding.",
+            rule="ai-review",
+        ),
+        Finding(
+            "medium",
+            "bug",
+            "b.py",
+            2,
+            "Second AI finding, different text.",
+            rule="ai-review",
+        ),
+        Finding("low", "style", "c.py", 3, "First style finding."),
+        Finding("low", "style", "d.py", 4, "Second style finding."),
+        Finding(
+            "high",
+            "security",
+            "e.py",
+            5,
+            "Specific check message.",
+            rule="dangerous-eval",
+        ),
+    ]
+    parsed = json.loads(findings_to_sarif(findings))
+    rules = {r["id"]: r for r in parsed["runs"][0]["tool"]["driver"]["rules"]}
+    assert sorted(rules) == [
+        "ai-review",
+        "dangerous-eval",
+        "pr-sentinel-style",
+    ]
+    # Shared rules: generic, not the first finding's message.
+    assert rules["ai-review"]["shortDescription"]["text"] == "AI review finding"
+    assert "First AI finding." not in rules["ai-review"]["shortDescription"]["text"]
+    assert (
+        rules["pr-sentinel-style"]["shortDescription"]["text"]
+        == "pr-sentinel style finding"
+    )
+    assert (
+        "First style finding."
+        not in rules["pr-sentinel-style"]["shortDescription"]["text"]
+    )
+    # A specific static-check rule still keeps its own message.
+    assert (
+        rules["dangerous-eval"]["shortDescription"]["text"] == "Specific check message."
+    )
+
+
+def test_sarif_unknown_severity_defaults_to_warning():
+    """A severity outside the known mapping falls back to "warning"
+    instead of raising (defensive .get)."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    finding = Finding("high", "bug", "a.py", 1, "Weird severity.")
+    finding.severity = "bogus"  # bypass Finding's own validation
+    parsed = json.loads(findings_to_sarif([finding]))
+    assert parsed["runs"][0]["results"][0]["level"] == "warning"
+
+
+def test_sarif_version_parameter():
+    from pr_sentinel.reporter import findings_to_sarif
+
+    parsed = json.loads(findings_to_sarif([], version="9.9.9"))
+    assert parsed["runs"][0]["tool"]["driver"]["version"] == "9.9.9"
+
+
+def test_sarif_never_echoes_secret_values():
+    """A leaked-key finding's SARIF must not contain the key itself:
+    static-check messages are fixed strings, never the matched text."""
+    from pr_sentinel.diff import parse_diff
+    from pr_sentinel.reporter import findings_to_sarif
+    from pr_sentinel.static_checks import run_static_checks
+
+    key = "sk-abcdefghij1234567890"
+    diff = parse_diff(
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        f'+api_key = "{key}"\n'
+    )
+    findings = run_static_checks(diff)
+    assert findings, "expected a leaked-key finding"
+    assert all(f.severity == "critical" for f in findings)
+    sarif = findings_to_sarif(findings)
+    assert key not in sarif
+    assert "OpenAI API key" in sarif

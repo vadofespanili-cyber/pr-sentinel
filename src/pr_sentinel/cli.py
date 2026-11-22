@@ -7,6 +7,7 @@ import fnmatch
 import sys
 from dataclasses import fields
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .config import (
@@ -17,9 +18,15 @@ from .config import (
     load_config,
 )
 from .diff import DiffFile, parse_diff
-from .findings import Finding, filter_findings, sort_findings
+from .findings import SEVERITY_RANK, Finding, filter_findings, sort_findings
 from .github_client import GitHubClient, GitHubError
-from .reporter import build_inline_comments, build_summary, findings_to_json
+from .reporter import (
+    SUMMARY_MARKER,
+    build_inline_comments,
+    build_summary,
+    findings_to_json,
+    findings_to_sarif,
+)
 
 # The reviewer and static checks are built by other parts of the project.
 # They are imported lazily so `check-config` (and static-only runs) keep
@@ -46,6 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="Do not post the review to GitHub."
     )
     review.add_argument("--json-out", help="Write findings as JSON to this path.")
+    review.add_argument(
+        "--sarif-out", help="Write findings as SARIF 2.1.0 to this path."
+    )
+    review.add_argument(
+        "--fail-on-severity",
+        type=_normalize_gate_value,
+        choices=["none", "critical", "high", "medium", "low"],
+        default=None,
+        help="Exit 1 if any reported finding meets this severity "
+        "(overrides the config file; default: no gate).",
+    )
 
     review_diff = subparsers.add_parser(
         "review-diff", help="Review a local patch file (no GitHub needed)."
@@ -53,6 +71,17 @@ def build_parser() -> argparse.ArgumentParser:
     review_diff.add_argument("--file", required=True, help="Path to a .patch file.")
     review_diff.add_argument("--config", help="Path to a config file.")
     review_diff.add_argument("--json-out", help="Write findings as JSON to this path.")
+    review_diff.add_argument(
+        "--sarif-out", help="Write findings as SARIF 2.1.0 to this path."
+    )
+    review_diff.add_argument(
+        "--fail-on-severity",
+        type=_normalize_gate_value,
+        choices=["none", "critical", "high", "medium", "low"],
+        default=None,
+        help="Exit 1 if any reported finding meets this severity "
+        "(overrides the config file; default: no gate).",
+    )
 
     check_config = subparsers.add_parser(
         "check-config", help="Validate a config file and print its fields."
@@ -97,7 +126,13 @@ def _cmd_review_diff(args: argparse.Namespace) -> int:
         print(f"error: cannot read diff file: {exc}", file=sys.stderr)
         return 2
     return _run_and_report(
-        config, diff_text, pr_title="", pr_number=None, json_out=args.json_out
+        config,
+        diff_text,
+        pr_title="",
+        pr_number=None,
+        json_out=args.json_out,
+        sarif_out=args.sarif_out,
+        fail_on_severity=_effective_fail_on_severity(config, args),
     )
 
 
@@ -128,26 +163,108 @@ def _cmd_review(args: argparse.Namespace) -> int:
         config, diff_text, pr_title=title, pr_number=args.pr
     )
     if not args.dry_run:
-        if config.mode == "summary":
-            inline: list[dict[str, str | int]] = []
-        else:
-            inline = build_inline_comments(findings, files)[
-                : config.max_inline_comments
-            ]
         try:
-            client.create_review(
-                owner,
-                repo,
-                args.pr,
-                body=summary,
-                comments=inline,
-                event="COMMENT",
-            )
+            _post_review(client, owner, repo, args.pr, config, summary, findings, files)
         except GitHubError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 3
     print(summary)
-    return _write_json(findings, args.json_out)
+    return _finish_outputs(
+        findings,
+        args.json_out,
+        _effective_fail_on_severity(config, args),
+        sarif_out=args.sarif_out,
+        severity_threshold=config.severity_threshold,
+    )
+
+
+def _post_review(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    config: Config,
+    summary: str,
+    findings: list[Finding],
+    files: list[DiffFile],
+) -> None:
+    """Post the summary as an idempotent issue comment, then (in inline
+    mode) any inline comments as a review.
+
+    The summary comment is found by its hidden marker and updated in
+    place, so re-pushes never spam the PR with a new summary each time.
+    Inline comments go through create_review only when there is at least
+    one to post, with a brief body — the full findings table lives in the
+    summary comment, not in every review.
+    """
+    existing = _find_summary_comment(client, owner, repo, pr_number)
+    if existing is not None:
+        try:
+            client.update_issue_comment(owner, repo, existing["id"], summary)
+        except GitHubError as exc:
+            if exc.status in (403, 404):
+                # The comment vanished (or the token lost write access)
+                # between list and update: post a fresh summary instead
+                # of crashing the whole review with exit code 3.
+                client.create_issue_comment(owner, repo, pr_number, summary)
+            else:
+                raise
+    else:
+        client.create_issue_comment(owner, repo, pr_number, summary)
+    if config.mode != "inline":
+        return
+    inline = build_inline_comments(findings, files)[: config.max_inline_comments]
+    if not inline:
+        return
+    body = (
+        f"pr-sentinel posted {len(inline)} inline comment(s) below; "
+        "the full findings table is in the summary comment."
+    )
+    client.create_review(
+        owner, repo, pr_number, body=body, comments=inline, event="COMMENT"
+    )
+
+
+def _find_summary_comment(
+    client: GitHubClient, owner: str, repo: str, pr_number: int
+) -> dict[str, Any] | None:
+    """The bot's own summary comment, if any, found by its hidden marker.
+
+    Only a comment authored by this bot (or the token user) counts. An
+    unrelated user quoting the marker in a public repo must never be
+    PATCHed: that update would fail with 403/404 and crash the review.
+    """
+    for comment in client.list_issue_comments(owner, repo, pr_number):
+        body = comment.get("body")
+        if not (isinstance(body, str) and SUMMARY_MARKER in body):
+            continue
+        if _is_own_comment(client, comment):
+            return comment
+    return None
+
+
+def _is_own_comment(client: GitHubClient, comment: dict[str, Any]) -> bool:
+    """True when the comment was posted by this bot / token user.
+
+    The rule: ``user.type == "Bot"`` (e.g. github-actions[bot] under
+    GITHUB_TOKEN), or the author's login matches the authenticated token
+    user (GET /user, cached on the client — covers personal-access-token
+    runs). A failed /user lookup means "unknown": only bot comments
+    count. A comment with no usable author info is never treated as ours.
+    """
+    user = comment.get("user")
+    if not isinstance(user, dict):
+        return False
+    if user.get("type") == "Bot":
+        return True
+    login = user.get("login")
+    if not isinstance(login, str) or not login:
+        return False
+    try:
+        me = client.get_authenticated_user()
+    except GitHubError:
+        return False
+    return isinstance(me, dict) and me.get("login") == login
 
 
 def _run_and_report(
@@ -156,12 +273,113 @@ def _run_and_report(
     pr_title: str,
     pr_number: int | None,
     json_out: str | None,
+    fail_on_severity: str | None = None,
+    sarif_out: str | None = None,
 ) -> int:
     summary, findings, _files = _prepare_review(
         config, diff_text, pr_title=pr_title, pr_number=pr_number
     )
     print(summary)
-    return _write_json(findings, json_out)
+    return _finish_outputs(
+        findings,
+        json_out,
+        fail_on_severity,
+        sarif_out=sarif_out,
+        severity_threshold=config.severity_threshold,
+    )
+
+
+def _normalize_gate_value(value: str) -> str:
+    """Normalize a --fail-on-severity value: case- and
+    whitespace-insensitive, blank means "none". argparse applies this
+    before its choices check, so an uppercase value works and an
+    invalid one still exits 2."""
+    normalized = value.strip().lower()
+    return "none" if normalized == "" else normalized
+
+
+def _effective_fail_on_severity(config: Config, args: argparse.Namespace) -> str | None:
+    """The CI gate severity: the CLI flag wins over the config file.
+
+    ``"none"`` (from either source) means "no gate"; the config value is
+    already normalized by ``Config.__post_init__`` and the CLI value by
+    the argument parser, but normalize defensively here too so direct
+    callers get the same treatment.
+    """
+    raw = getattr(args, "fail_on_severity", None)
+    if raw is not None:
+        normalized = raw.strip().lower() if isinstance(raw, str) else raw
+        return None if normalized in ("", "none") else normalized
+    return config.fail_on_severity
+
+
+def _meets_gate(findings: list[Finding], fail_on_severity: str) -> bool:
+    """True when a reported finding meets or exceeds the gate severity."""
+    threshold_rank = SEVERITY_RANK[fail_on_severity]
+    return any(
+        SEVERITY_RANK[finding.severity] <= threshold_rank for finding in findings
+    )
+
+
+def _finish_outputs(
+    findings: list[Finding],
+    json_out: str | None,
+    fail_on_severity: str | None,
+    sarif_out: str | None = None,
+    severity_threshold: str | None = None,
+) -> int:
+    """Write outputs, then apply the CI gate — in that order.
+
+    The gate is evaluated last on purpose: when a run fails the gate
+    (exit 1), the review has already been posted and every output file
+    already written, so CI still has the full report to look at.
+    """
+    code = _write_json(findings, json_out)
+    if code != 0:
+        return code
+    code = _write_sarif(findings, sarif_out)
+    if code != 0:
+        return code
+    if fail_on_severity is not None:
+        _warn_gate_below_threshold(fail_on_severity, severity_threshold)
+        if _meets_gate(findings, fail_on_severity):
+            count = sum(
+                1
+                for finding in findings
+                if SEVERITY_RANK[finding.severity] <= SEVERITY_RANK[fail_on_severity]
+            )
+            noun = "finding" if count == 1 else "findings"
+            verb = "meets" if count == 1 else "meet"
+            verb2 = "exceeds" if count == 1 else "exceed"
+            print(
+                f"error: fail_on_severity={fail_on_severity}: {count} {noun} "
+                f"{verb} or {verb2} the threshold",
+                file=sys.stderr,
+            )
+            return 1
+    return 0
+
+
+def _warn_gate_below_threshold(
+    fail_on_severity: str, severity_threshold: str | None
+) -> None:
+    """Warn when the gate is lower than the reporting threshold.
+
+    Findings below severity_threshold are filtered out before the gate
+    runs, so a lower gate can only ever fire on findings at or above
+    the threshold — the lower severities it names can never trigger it.
+    """
+    if severity_threshold is None:
+        return
+    if SEVERITY_RANK[fail_on_severity] > SEVERITY_RANK[severity_threshold]:
+        print(
+            f"warning: fail_on_severity={fail_on_severity} is lower "
+            f"(less severe) than severity_threshold={severity_threshold}; "
+            f"findings below {severity_threshold} are filtered out "
+            "before the gate runs, so the gate can only fire on "
+            f"findings at or above {severity_threshold}",
+            file=sys.stderr,
+        )
 
 
 def _prepare_review(
@@ -332,8 +550,27 @@ def _write_json(findings: list[Finding], json_out: str | None) -> int:
     if json_out is None:
         return 0
     try:
-        Path(json_out).write_text(findings_to_json(findings), encoding="utf-8")
+        path = Path(json_out)
+        # Nested paths like reports/findings.json work cleanly: the
+        # parent directory is created when it does not exist yet.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(findings_to_json(findings), encoding="utf-8")
     except OSError as exc:
         print(f"error: cannot write JSON output: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _write_sarif(findings: list[Finding], sarif_out: str | None) -> int:
+    if sarif_out is None:
+        return 0
+    try:
+        path = Path(sarif_out)
+        # Nested paths like reports/sentinel.sarif work cleanly: the
+        # parent directory is created when it does not exist yet.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(findings_to_sarif(findings), encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot write SARIF output: {exc}", file=sys.stderr)
         return 2
     return 0
