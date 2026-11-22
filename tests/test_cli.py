@@ -12,7 +12,9 @@ import pytest
 
 import pr_sentinel.cli as cli_module
 from pr_sentinel import __version__
-from pr_sentinel.cli import main
+from pr_sentinel.cli import _prepare_review, main
+from pr_sentinel.config import Config
+from pr_sentinel.diff import parse_diff
 from pr_sentinel.findings import Finding
 
 SAMPLE_DIFF = (
@@ -438,3 +440,140 @@ def test_review_without_github_token_exits_3(
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     assert main(["review", "--repo", "o/r", "--pr", "1"]) == 3
     assert "GITHUB_TOKEN" in capsys.readouterr().err
+
+
+def test_review_with_empty_github_token_exits_3(tmp_path, monkeypatch, capsys):
+    """An empty-string token is rejected, not sent as an empty Bearer."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "")
+    assert main(["review", "--repo", "o/r", "--pr", "1"]) == 3
+    assert "GITHUB_TOKEN is not set" in capsys.readouterr().err
+
+
+def test_review_diff_non_utf8_patch_exits_2(tmp_path, monkeypatch, capsys):
+    """A patch file with non-UTF-8 bytes is a usage error, not a crash."""
+    monkeypatch.chdir(tmp_path)
+    patch = tmp_path / "bad.patch"
+    patch.write_bytes(b"diff --git a/a.py b/a.py\n+caf\xff\n")
+    assert main(["review-diff", "--file", str(patch)]) == 2
+    assert "error" in capsys.readouterr().err
+
+
+# --- _prepare_review pipeline order (v0.1.2) ---------------------------------
+
+
+def test_prepare_review_ignores_files_before_max_files(monkeypatch, capsys):
+    """Ignored files must not consume the max_files quota (or AI tokens):
+    with max_files=1 and the ignored file first, the real file is still
+    reviewed."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    diff = (
+        "diff --git a/vendor/v.py b/vendor/v.py\n"
+        "--- a/vendor/v.py\n"
+        "+++ b/vendor/v.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        "+eval(v)\n"
+        "diff --git a/src/a.py b/src/a.py\n"
+        "--- a/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " y = 1\n"
+        "+eval(a)\n"
+    )
+    config = Config(ignore_paths=["vendor/**"], max_files=1, severity_threshold="low")
+    _summary, findings, files = _prepare_review(config, diff)
+    assert [f.path for f in files] == ["src/a.py"]
+    assert [f.file for f in findings] == ["src/a.py"]
+    err = capsys.readouterr().err
+    assert "ignoring 1 file" in err
+    assert "reviewing the first" not in err
+
+
+def test_prepare_review_drops_whole_trailing_files_over_size_limit(monkeypatch, capsys):
+    """The size limit is applied after parsing: whole trailing files go,
+    and the kept file's hunks stay intact (never cut mid-hunk)."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    first = (
+        "diff --git a/one.py b/one.py\n"
+        "--- a/one.py\n"
+        "+++ b/one.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " a = 1\n"
+        "+eval(one)\n"
+        "@@ -10,1 +11,2 @@\n"
+        " b = 1\n"
+        "+eval(two)\n"
+    )
+    second = (
+        "diff --git a/two.py b/two.py\n"
+        "--- a/two.py\n"
+        "+++ b/two.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " c = 1\n"
+        "+eval(three)\n"
+    )
+    files = parse_diff(first + second)
+    budget = len(files[0].render_patch()) + 5  # first file fits, both do not
+    config = Config(max_diff_chars=budget, severity_threshold="low")
+    _summary, findings, kept = _prepare_review(config, first + second)
+    assert [f.path for f in kept] == ["one.py"]
+    assert len(kept[0].hunks) == 2
+    assert all(f.file == "one.py" for f in findings)
+    assert "dropped" in capsys.readouterr().err
+
+
+def test_prepare_review_keeps_single_oversized_hunk_whole(monkeypatch, capsys):
+    """One hunk alone larger than the limit is kept whole (and warned
+    about) instead of leaving nothing to review."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    body = "".join(f"+line {i}\n" for i in range(20))
+    diff = (
+        "diff --git a/big.py b/big.py\n"
+        "--- a/big.py\n"
+        "+++ b/big.py\n"
+        "@@ -0,0 +1,20 @@\n" + body
+    )
+    config = Config(max_diff_chars=50, severity_threshold="low")
+    _summary, _findings, kept = _prepare_review(config, diff)
+    assert len(kept) == 1
+    assert len(kept[0].hunks) == 1
+    assert len(kept[0].hunks[0].lines) == 20
+    assert "kept whole" in capsys.readouterr().err
+
+
+def test_review_diff_warns_about_plain_http_base_url(
+    tmp_path, monkeypatch, capsys, model_server
+):
+    """With an http:// model URL and an API key, the key is sent in
+    cleartext: the run must warn about it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    patch = tmp_path / "sample.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    config = _write_config(tmp_path, model_server)
+    assert main(["review-diff", "--file", str(patch), "--config", str(config)]) == 0
+    assert "cleartext" in capsys.readouterr().err
+
+
+def test_review_diff_static_only_summary_names_static_checks(
+    tmp_path, monkeypatch, capsys
+):
+    """In static-only mode the summary must not claim AI-generated
+    findings."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = tmp_path / "sample.patch"
+    patch.write_text(
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        "+eval(user_input)\n",
+        encoding="utf-8",
+    )
+    assert main(["review-diff", "--file", str(patch)]) == 0
+    out = capsys.readouterr().out
+    assert "deterministic static checks" in out
+    assert "AI-generated suggestions" not in out
