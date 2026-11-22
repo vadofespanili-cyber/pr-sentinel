@@ -1,0 +1,32 @@
+name: "pr-sentinel"
+description: "AI-powered pull request review"
+author: "Jalal"
+
+inputs:
+  github-token:
+    description: "GitHub token with pull-request write access"
+    required: true
+    default: ${{ github.token }}
+  api-key:
+    description: "API key for the Responses-compatible model provider"
+    required: true
+  repository:
+    description: "Repository as OWNER/REPO"
+    required: false
+    default: ${{ github.repository }}
+  pr-number:
+    description: "Pull request number (defaults to the PR that triggered the run)"
+    required: false
+    default: ""
+  config-path:
+    description: "Path to the pr-sentinel config file"
+    required: false
+    default: ""
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+
+branding:
+  icon: "eye"
+  color: "blue"
