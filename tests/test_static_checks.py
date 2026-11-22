@@ -37,6 +37,18 @@ def test_openai_key_fires():
     assert "F" * 32 not in findings[0].message
 
 
+def test_openai_project_key_fires():
+    findings = _check(['api_key = "sk-proj-' + "F" * 32 + '"'])
+    assert "leaked-openai-key" in _rules(findings)
+    assert findings[0].severity == "critical"
+    assert findings[0].category == "security"
+    assert findings[0].file == "app.py"
+    # The secret value itself must not be echoed in the message.
+    assert "F" * 32 not in findings[0].message
+    # Must not double-report via the generic credential rule.
+    assert "hardcoded-credential" not in _rules(findings)
+
+
 def test_github_token_fires():
     for token in [
         "ghp_" + "F" * 36,
@@ -94,7 +106,7 @@ def test_eval_exec_fire():
     assert "dangerous-exec" in _rules(_check(["exec(code)"]))
     findings = _check(["eval(user_input)"])
     assert findings[0].severity == "high"
-    assert findings[0].category == "bug"
+    assert findings[0].category == "security"
 
 
 def test_os_system_and_shell_true_fire():
