@@ -3,6 +3,37 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Optional CI gate (`fail_on_severity`).** Set `fail_on_severity` in
+  the config file, pass `--fail-on-severity` to `review` /
+  `review-diff` (the flag wins over the config file), or set the
+  `fail_on_severity` Action input. The run exits `1` when a reported
+  finding meets or exceeds the threshold (`critical` > `high` >
+  `medium` > `low`; `none` disables the gate). The review is always
+  posted and `--json-out` / `--sarif-out` are always written before
+  exit `1`. Default behaviour is unchanged: no gate, exit `0`.
+- **Idempotent summary comment.** The summary is posted as an issue
+  comment with a hidden `<!-- pr-sentinel:summary -->` marker and
+  updated in place on re-push, so the PR is no longer spammed with a
+  new summary per push. In `inline` mode, `create_review` is only
+  called when there are inline comments to submit, with a brief body
+  instead of the full summary table; `summary` mode no longer creates
+  a review at all. `--dry-run` creates or updates nothing.
+- **SARIF 2.1.0 output (`--sarif-out`).** `findings_to_sarif()` emits
+  valid SARIF 2.1.0 (stdlib `json` only) with deduplicated rules, the
+  `critical`/`high` → `error`, `medium` → `warning`, `low` → `note`
+  mapping, and file + 1-based line locations. Available on both
+  `review` and `review-diff` and as the `sarif_out` Action input; see
+  the README for the `github/codeql-action/upload-sarif@v3` example.
+
+### Changed
+
+- The example workflow (`examples/github-workflow.yml`) now pins
+  `@v0.2.0` and demonstrates the new inputs and the SARIF upload step.
+
 ## [0.1.2] - 2026-11-22
 
 Fixes for every verified finding from an independent external review of
