@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: vadofespanili-cyber/pr-sentinel@v0
         with:
-          api-key: ${{ secrets.PR_SENTINEL_API_KEY }}
+          api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
 ```
 
 `PR_SENTINEL_API_KEY` must be a key for a Responses-compatible model
@@ -196,9 +196,9 @@ design decisions.
 
 Versioned releases live on the
 [Releases page](https://github.com/vadofespanili-cyber/pr-sentinel/releases).
-The current release is **v0.1.0** — see the
+The current release is **v0.1.1** — see the
 [Changelog](CHANGELOG.md) and the
-[release notes](docs/release-notes-v0.1.0.md) for what it includes.
+[release notes](docs/release-notes-v0.1.1.md) for what it includes.
 
 ## Development
 
