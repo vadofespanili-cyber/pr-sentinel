@@ -134,3 +134,70 @@ def test_config_path_is_forwarded(stub_bin, tmp_path):
     assert result.returncode == 0, result.stderr
     argv = (stub_bin / "argv").read_text().strip()
     assert argv == f"review --repo o/r --pr 3 --config {config}"
+
+
+def test_null_pull_request_in_event_json_exits_2(stub_bin, tmp_path):
+    """A null pull_request in the event payload must not crash the
+    script with AttributeError (v0.1.2): it is simply no PR number."""
+    event = tmp_path / "event.json"
+    event.write_text('{"pull_request": null}\n', encoding="utf-8")
+    result = run_entrypoint(
+        {"INPUT_GITHUB_TOKEN": "ghp_test", "GITHUB_EVENT_PATH": str(event)}
+    )
+    assert result.returncode == 2
+    assert "no pull request number" in result.stderr
+    assert "AttributeError" not in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_pr_number_from_event_json(stub_bin, tmp_path):
+    """The PR number is read from the event payload when no input is set."""
+    event = tmp_path / "event.json"
+    event.write_text('{"pull_request": {"number": 55}}\n', encoding="utf-8")
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "GITHUB_EVENT_PATH": str(event),
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 55"
+
+
+def test_repository_falls_back_to_github_repository(stub_bin):
+    """Without the repository input, $GITHUB_REPOSITORY is used."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_PR_NUMBER": "9",
+            "GITHUB_REPOSITORY": "o/r",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 9"
+
+
+def test_empty_token_is_not_exported(stub_bin):
+    """An empty token input must not become an exported empty
+    GITHUB_TOKEN: the CLI then fails with the clear 'not set' error
+    instead of sending an empty Bearer header."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "",
+            "INPUT_API_KEY": "",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "4",
+        }
+    )
+    assert result.returncode == 2
+    assert "GITHUB_TOKEN is not set" in result.stderr
+    assert (stub_bin / "github_token").read_text() == ""
+
+
+def test_error_message_names_pr_number_input():
+    """The missing-PR error names the pr_number input (v0.1.1 wording)."""
+    result = run_entrypoint({"INPUT_GITHUB_TOKEN": "ghp_test"})
+    assert result.returncode == 2
+    assert "pr_number" in result.stderr
+    assert "pr-number" not in result.stderr
