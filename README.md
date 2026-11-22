@@ -54,7 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.1.1
+      - uses: vadofespanili-cyber/pr-sentinel@v0.1.2
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
 ```
@@ -184,11 +184,21 @@ design decisions.
   invariants.
 - **Static checks are single-line regexes.** Multi-line patterns (for
   example `yaml.load(` split across lines) are not detected, and the
-  generic credential pattern can fire on harmless test values.
+  generic credential pattern can fire on harmless test values. A full
+  AST-based analysis was deliberately not added: the reviewer only sees
+  the diff, not full file contents, so AST on partial content would
+  still miss cases.
 - **Model-dependent.** Review quality depends on the model and on the diff
-  fitting into context; very large PRs are truncated at `max_diff_chars`.
-- **No retries.** A failed AI request (network error, rate limit) falls
-  back to static checks only, with a warning — it does not retry.
+  fitting into context; very large PRs are limited at `max_diff_chars`:
+  whole trailing files/hunks are dropped (never cut mid-hunk), with a
+  warning.
+- **Retries.** Transient failures (HTTP 429/5xx, network errors) are
+  retried up to 3 attempts with exponential backoff, honoring a
+  Retry-After header; a persistent failure falls back to static checks
+  only, with a warning.
+- **No CI gate on critical findings.** The exit code is always 0 on a
+  completed review, and the summary comment is not updated when new
+  commits are pushed. Both are planned for a later minor version.
 - **English prompts.** Review prompts and messages are in English in
   v0.1.0.
 
@@ -196,9 +206,9 @@ design decisions.
 
 Versioned releases live on the
 [Releases page](https://github.com/vadofespanili-cyber/pr-sentinel/releases).
-The current release is **v0.1.1** — see the
+The current release is **v0.1.2** — see the
 [Changelog](CHANGELOG.md) and the
-[release notes](docs/release-notes-v0.1.1.md) for what it includes.
+[release notes](docs/release-notes-v0.1.2.md) for what it includes.
 
 ## Development
 
