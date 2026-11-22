@@ -1,0 +1,14 @@
+diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1,4 +1,9 @@
+ def hello(name):
+-    return f"Hello, {name}!"
++    import os
++    api_key = "sk-fake1234567890abcdefghij"
++    result = eval("hello(" + name + ")")
++    items = []
++    for i in range(1000):
++        for j in range(1000):
++            items.append(i * j)
++    return result
