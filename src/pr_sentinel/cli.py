@@ -64,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exit 1 if any reported finding meets this severity "
         "(overrides the config file; default: no gate).",
     )
+    review.add_argument(
+        "--reviewed-commit",
+        default=None,
+        help="Full commit SHA the review covers; shown as "
+        "'Reviewed commit: <short-sha>' at the bottom of the summary "
+        "comment (default: no line).",
+    )
 
     review_diff = subparsers.add_parser(
         "review-diff", help="Review a local patch file (no GitHub needed)."
@@ -81,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Exit 1 if any reported finding meets this severity "
         "(overrides the config file; default: no gate).",
+    )
+    review_diff.add_argument(
+        "--reviewed-commit",
+        default=None,
+        help="Full commit SHA the reviewed patch came from; shown as "
+        "'Reviewed commit: <short-sha>' at the bottom of the summary "
+        "(default: no line).",
     )
 
     check_config = subparsers.add_parser(
@@ -133,6 +147,7 @@ def _cmd_review_diff(args: argparse.Namespace) -> int:
         json_out=args.json_out,
         sarif_out=args.sarif_out,
         fail_on_severity=_effective_fail_on_severity(config, args),
+        reviewed_commit=args.reviewed_commit,
     )
 
 
@@ -160,7 +175,11 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 3
     title = pull.get("title", "") if isinstance(pull, dict) else ""
     summary, findings, files = _prepare_review(
-        config, diff_text, pr_title=title, pr_number=args.pr
+        config,
+        diff_text,
+        pr_title=title,
+        pr_number=args.pr,
+        reviewed_commit=args.reviewed_commit,
     )
     if not args.dry_run:
         try:
@@ -275,9 +294,14 @@ def _run_and_report(
     json_out: str | None,
     fail_on_severity: str | None = None,
     sarif_out: str | None = None,
+    reviewed_commit: str | None = None,
 ) -> int:
     summary, findings, _files = _prepare_review(
-        config, diff_text, pr_title=pr_title, pr_number=pr_number
+        config,
+        diff_text,
+        pr_title=pr_title,
+        pr_number=pr_number,
+        reviewed_commit=reviewed_commit,
     )
     print(summary)
     return _finish_outputs(
@@ -387,6 +411,7 @@ def _prepare_review(
     diff_text: str,
     pr_title: str = "",
     pr_number: int | None = None,
+    reviewed_commit: str | None = None,
 ) -> tuple[str, list[Finding], list[DiffFile]]:
     """Parse, limit and review the diff, then filter and summarize.
 
@@ -410,7 +435,11 @@ def _prepare_review(
         filter_findings(findings, threshold=config.severity_threshold)
     )
     summary = build_summary(
-        findings, pr_title=pr_title, pr_number=pr_number, ai_used=ai_used
+        findings,
+        pr_title=pr_title,
+        pr_number=pr_number,
+        ai_used=ai_used,
+        reviewed_commit=reviewed_commit,
     )
     return summary, findings, files
 

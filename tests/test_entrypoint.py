@@ -293,3 +293,51 @@ def test_config_path_combines_with_new_inputs(stub_bin, tmp_path):
         argv == f"review --repo o/r --pr 3 --config {config} "
         "--fail-on-severity critical --sarif-out out.sarif"
     )
+
+
+# --- Reviewed commit input (v0.2.1) -----------------------------------------
+
+
+def test_reviewed_commit_is_forwarded(stub_bin):
+    """The reviewed_commit input reaches the CLI as --reviewed-commit."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_REVIEWED_COMMIT": "abc1234def5678",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert argv == "review --repo o/r --pr 42 --reviewed-commit abc1234def5678"
+
+
+def test_reviewed_commit_whitespace_is_trimmed(stub_bin):
+    """Surrounding whitespace is trimmed before forwarding."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_REVIEWED_COMMIT": "  abc1234  ",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert argv == "review --repo o/r --pr 42 --reviewed-commit abc1234"
+
+
+def test_empty_reviewed_commit_is_not_forwarded(stub_bin):
+    """An empty or whitespace-only reviewed_commit adds no flag at all."""
+    for value in ("", "   "):
+        result = run_entrypoint(
+            {
+                "INPUT_GITHUB_TOKEN": "ghp_test",
+                "INPUT_REPOSITORY": "o/r",
+                "INPUT_PR_NUMBER": "42",
+                "INPUT_REVIEWED_COMMIT": value,
+            }
+        )
+        assert result.returncode == 0, result.stderr
+        assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 42"

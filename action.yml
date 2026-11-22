@@ -31,6 +31,10 @@ inputs:
     description: "Write findings as SARIF 2.1.0 to this path (relative to the workspace, e.g. pr-sentinel.sarif)"
     required: false
     default: ""
+  reviewed_commit:
+    description: "Full commit SHA the review covers; shown as 'Reviewed commit: <short-sha>' at the bottom of the summary comment (default: no line)"
+    required: false
+    default: ""
 
 runs:
   using: "docker"

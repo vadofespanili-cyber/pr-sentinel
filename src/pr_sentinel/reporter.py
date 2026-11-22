@@ -26,18 +26,40 @@ _STATIC_NOTE = (
 _FOOTER = "---\nReviewed by pr-sentinel"
 
 
+def _reviewed_commit_line(reviewed_commit: str | None) -> str | None:
+    """The "Reviewed commit: <short-sha>" footer line, or None.
+
+    The value is stripped and shortened to its first 7 characters; a
+    missing or blank value means no line at all, so the output stays
+    byte-identical to v0.2.0 unless a commit is actually given.
+    """
+    if not reviewed_commit:
+        return None
+    short = reviewed_commit.strip()[:7]
+    return f"Reviewed commit: {short}" if short else None
+
+
 def build_summary(
     findings: list[Finding],
     pr_title: str = "",
     pr_number: int | None = None,
     ai_used: bool = True,
+    reviewed_commit: str | None = None,
 ) -> str:
     """Render the review summary as Markdown.
 
     ``ai_used`` says whether the AI reviewer actually ran: the note under
     the table names the source of the findings, so a static-only review
-    is never presented as AI output.
+    is never presented as AI output. ``reviewed_commit`` (when given)
+    adds a "Reviewed commit: <short-sha>" line at the very bottom of the
+    visible body — after "Reviewed by pr-sentinel", before the hidden
+    marker — so readers can see at a glance which commit the review
+    covers.
     """
+    footer = _FOOTER
+    commit_line = _reviewed_commit_line(reviewed_commit)
+    if commit_line is not None:
+        footer = f"{_FOOTER}\n{commit_line}"
     if pr_number is not None:
         title = f"# pr-sentinel review — PR #{pr_number}"
         if pr_title:
@@ -50,7 +72,7 @@ def build_summary(
     lines = [title, ""]
     if not findings:
         lines.append("No findings. Nothing to report — the changes look clean.")
-        lines.extend(["", _FOOTER, "", SUMMARY_MARKER])
+        lines.extend(["", footer, "", SUMMARY_MARKER])
         return "\n".join(lines) + "\n"
 
     counts = Counter(f.severity for f in findings)
@@ -71,7 +93,7 @@ def build_summary(
             f"| {_cell(finding.message)} |"
         )
     lines.extend(
-        ["", _AI_NOTE if ai_used else _STATIC_NOTE, "", _FOOTER, "", SUMMARY_MARKER]
+        ["", _AI_NOTE if ai_used else _STATIC_NOTE, "", footer, "", SUMMARY_MARKER]
     )
     return "\n".join(lines) + "\n"
 
