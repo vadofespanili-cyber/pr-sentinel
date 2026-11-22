@@ -201,3 +201,60 @@ def test_error_message_names_pr_number_input():
     assert result.returncode == 2
     assert "pr_number" in result.stderr
     assert "pr-number" not in result.stderr
+
+
+def test_fail_on_severity_and_sarif_out_are_forwarded(stub_bin):
+    """The v0.2.0 inputs reach the CLI as --fail-on-severity and
+    --sarif-out (tested with real sh)."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_FAIL_ON_SEVERITY": "high",
+            "INPUT_SARIF_OUT": "report.sarif",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert (
+        argv
+        == "review --repo o/r --pr 42 --fail-on-severity high --sarif-out report.sarif"
+    )
+
+
+def test_empty_optional_inputs_are_not_forwarded(stub_bin):
+    """Empty fail_on_severity / sarif_out inputs add no flags at all."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_FAIL_ON_SEVERITY": "",
+            "INPUT_SARIF_OUT": "",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 42"
+
+
+def test_config_path_combines_with_new_inputs(stub_bin, tmp_path):
+    """--config, --fail-on-severity and --sarif-out compose in one call."""
+    config = tmp_path / "custom.yaml"
+    config.write_text("model: test-model\n")
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "3",
+            "INPUT_CONFIG_PATH": str(config),
+            "INPUT_FAIL_ON_SEVERITY": "critical",
+            "INPUT_SARIF_OUT": "out.sarif",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert (
+        argv == f"review --repo o/r --pr 3 --config {config} "
+        "--fail-on-severity critical --sarif-out out.sarif"
+    )
