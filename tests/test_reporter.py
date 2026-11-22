@@ -62,6 +62,18 @@ def test_summary_contains_counts_and_table_rows():
     assert "Reviewed by pr-sentinel" in summary
 
 
+def test_summary_note_names_static_checks_when_ai_did_not_run():
+    summary = build_summary(sample_findings(), ai_used=False)
+    assert "deterministic static checks" in summary
+    assert "AI-generated suggestions" not in summary
+
+
+def test_summary_note_names_ai_when_ai_ran():
+    summary = build_summary(sample_findings(), ai_used=True)
+    assert "AI-generated suggestions" in summary
+    assert "deterministic static checks" not in summary
+
+
 def test_summary_without_pr_info():
     summary = build_summary(sample_findings())
     assert summary.startswith("# pr-sentinel review\n")
@@ -75,40 +87,48 @@ def test_summary_empty_findings():
     assert "Reviewed by pr-sentinel" in summary
 
 
-def test_inline_comments_use_patch_positions():
+def test_inline_comments_use_line_and_side():
     diff_files = parse_diff(SAMPLE_DIFF)
     comments = build_inline_comments(sample_findings(), diff_files)
-    # Line 2 of src/a.py is the first added line: position 3
-    # (hunk header = 1, context line = 2, added line = 3).
-    # Line 3 is the second added line: position 4.
+    # Line 2 of src/a.py is the first added line; line 3 the second.
     # The src/b.py finding has no line, so it is skipped.
     assert comments == [
         {
             "path": "src/a.py",
-            "position": 3,
+            "line": 2,
+            "side": "RIGHT",
             "body": (
                 "**high · bug**\n\nUnused import.\n\n**Suggestion:** Remove the import."
             ),
         },
         {
             "path": "src/a.py",
-            "position": 4,
+            "line": 3,
+            "side": "RIGHT",
             "body": "**low · style**\n\nImport order.",
         },
     ]
 
 
-def test_inline_comments_skip_findings_without_a_position():
+def test_inline_comments_cover_context_lines_but_skip_unmapped_findings():
     diff_files = parse_diff(SAMPLE_DIFF)
     findings = [
-        # Line 1 is a context line, not an added line: no patch position.
+        # Line 1 is a context line, but it exists in the new file, so it
+        # gets a comment (since v0.1.2).
         Finding("medium", "bug", "src/a.py", 1, "Context line."),
         # File not in the diff at all.
         Finding("medium", "bug", "src/missing.py", 1, "Missing file."),
         # No line number.
         Finding("medium", "bug", "src/a.py", None, "No line."),
     ]
-    assert build_inline_comments(findings, diff_files) == []
+    assert build_inline_comments(findings, diff_files) == [
+        {
+            "path": "src/a.py",
+            "line": 1,
+            "side": "RIGHT",
+            "body": "**medium · bug**\n\nContext line.",
+        }
+    ]
 
 
 def test_findings_to_json_round_trips():
