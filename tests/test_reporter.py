@@ -219,6 +219,112 @@ def test_sarif_empty_findings():
     assert parsed["version"] == "2.1.0"
 
 
+def test_sarif_line_zero_or_negative_omits_region():
+    """SARIF requires startLine >= 1: a missing or invalid line omits
+    the region (the artifact location is still kept). Finding normally
+    rejects line < 1, so the invalid lines are set after construction
+    to exercise the defensive path."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    zero = Finding("high", "bug", "src/a.py", 5, "Zero line.", rule="some-rule")
+    zero.line = 0
+    negative = Finding("high", "bug", "src/a.py", 5, "Negative line.")
+    negative.line = -3
+    parsed = json.loads(findings_to_sarif([zero, negative]))
+    results = parsed["runs"][0]["results"]
+    assert len(results) == 2
+    for result in results:
+        location = result["locations"][0]["physicalLocation"]
+        assert location["artifactLocation"]["uri"] == "src/a.py"
+        assert "region" not in location
+
+
+def test_sarif_uri_normalization():
+    """Artifact URIs use forward slashes and no leading ./ — Windows
+    and relative paths are normalized."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    findings = [
+        Finding("high", "bug", ".\\foo\\bar.py", 1, "Windows path."),
+        Finding("high", "bug", "./src/x.py", 2, "Relative path."),
+        Finding("high", "bug", "src/a.py", 3, "Plain path."),
+    ]
+    parsed = json.loads(findings_to_sarif(findings))
+    uris = [
+        r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        for r in parsed["runs"][0]["results"]
+    ]
+    assert uris == ["foo/bar.py", "src/x.py", "src/a.py"]
+
+
+def test_sarif_shared_rules_have_generic_descriptions():
+    """Shared rule ids get a generic description, not the first
+    finding's message: one rule covers many different findings."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    findings = [
+        Finding(
+            "high",
+            "bug",
+            "a.py",
+            1,
+            "First AI finding.",
+            rule="ai-review",
+        ),
+        Finding(
+            "medium",
+            "bug",
+            "b.py",
+            2,
+            "Second AI finding, different text.",
+            rule="ai-review",
+        ),
+        Finding("low", "style", "c.py", 3, "First style finding."),
+        Finding("low", "style", "d.py", 4, "Second style finding."),
+        Finding(
+            "high",
+            "security",
+            "e.py",
+            5,
+            "Specific check message.",
+            rule="dangerous-eval",
+        ),
+    ]
+    parsed = json.loads(findings_to_sarif(findings))
+    rules = {r["id"]: r for r in parsed["runs"][0]["tool"]["driver"]["rules"]}
+    assert sorted(rules) == [
+        "ai-review",
+        "dangerous-eval",
+        "pr-sentinel-style",
+    ]
+    # Shared rules: generic, not the first finding's message.
+    assert rules["ai-review"]["shortDescription"]["text"] == "AI review finding"
+    assert "First AI finding." not in rules["ai-review"]["shortDescription"]["text"]
+    assert (
+        rules["pr-sentinel-style"]["shortDescription"]["text"]
+        == "pr-sentinel style finding"
+    )
+    assert (
+        "First style finding."
+        not in rules["pr-sentinel-style"]["shortDescription"]["text"]
+    )
+    # A specific static-check rule still keeps its own message.
+    assert (
+        rules["dangerous-eval"]["shortDescription"]["text"] == "Specific check message."
+    )
+
+
+def test_sarif_unknown_severity_defaults_to_warning():
+    """A severity outside the known mapping falls back to "warning"
+    instead of raising (defensive .get)."""
+    from pr_sentinel.reporter import findings_to_sarif
+
+    finding = Finding("high", "bug", "a.py", 1, "Weird severity.")
+    finding.severity = "bogus"  # bypass Finding's own validation
+    parsed = json.loads(findings_to_sarif([finding]))
+    assert parsed["runs"][0]["results"][0]["level"] == "warning"
+
+
 def test_sarif_version_parameter():
     from pr_sentinel.reporter import findings_to_sarif
 
