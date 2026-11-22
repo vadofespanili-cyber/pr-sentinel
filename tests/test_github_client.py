@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+from pr_sentinel import __version__
 from pr_sentinel.github_client import GitHubClient, GitHubError
 
 SAMPLE_DIFF = (
@@ -122,7 +123,7 @@ def test_get_pull(client):
     headers = {k.lower(): v for k, v in request["headers"].items()}
     assert headers["authorization"] == "Bearer fake-token"
     assert headers["x-github-api-version"] == "2022-11-28"
-    assert headers["user-agent"] == "pr-sentinel/0.1.0"
+    assert headers["user-agent"] == f"pr-sentinel/{__version__}"
     assert headers["accept"] == "application/vnd.github+json"
 
 
