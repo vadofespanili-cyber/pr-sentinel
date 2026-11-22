@@ -8,7 +8,9 @@ flow lists. No external YAML library is needed (stdlib only).
 from __future__ import annotations
 
 import os
+import urllib.parse
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 from .findings import SEVERITIES
 
@@ -62,8 +64,19 @@ class Config:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ConfigError(f"{name} must be an integer >= 1, got {value!r}")
-        if not isinstance(self.api_base_url, str) or not self.api_base_url.startswith(
-            "http"
+        # A real URL needs a scheme and a host. Plain http:// is still
+        # allowed (local test servers use it), but the CLI warns about it
+        # when the API key is actually sent; garbage like "httpfoo" has
+        # neither a scheme nor a host and is rejected here.
+        parsed = (
+            urllib.parse.urlparse(self.api_base_url)
+            if isinstance(self.api_base_url, str)
+            else None
+        )
+        if (
+            parsed is None
+            or parsed.scheme not in ("http", "https")
+            or not parsed.netloc
         ):
             raise ConfigError(
                 f"api_base_url must be an http(s) URL, got {self.api_base_url!r}"
@@ -108,11 +121,11 @@ def parse_config_text(text: str) -> Config:
     return config
 
 
-def api_key_from_env(env: dict | None = None) -> str | None:
+def api_key_from_env(env: dict[str, str] | None = None) -> str | None:
     return (env if env is not None else os.environ).get(ENV_API_KEY) or None
 
 
-def github_token_from_env(env: dict | None = None) -> str | None:
+def github_token_from_env(env: dict[str, str] | None = None) -> str | None:
     return (env if env is not None else os.environ).get(ENV_GITHUB_TOKEN) or None
 
 
@@ -122,14 +135,16 @@ def github_token_from_env(env: dict | None = None) -> str | None:
 # full-line and trailing comments. Anything else raises ConfigError.
 
 
-def parse_yaml_subset(text: str) -> dict | list | str | int | float | bool | None:
+def parse_yaml_subset(
+    text: str,
+) -> dict[str, Any] | list[Any] | str | int | float | bool | None:
     lines = _logical_lines(text)
     if not lines:
         return None
     value, next_index = _parse_block(lines, 0, 0)
     if next_index != len(lines):
         raise ConfigError(f"unexpected content at line {lines[next_index][2]}")
-    return value
+    return cast(dict[str, Any] | list[Any] | str | int | float | bool | None, value)
 
 
 def _logical_lines(text: str) -> list[tuple[int, str, int]]:
@@ -150,7 +165,14 @@ def _strip_comment(raw: str) -> str:
     if raw.lstrip().startswith("#"):
         return ""
     in_single = in_double = False
-    for i, char in enumerate(raw):
+    i = 0
+    while i < len(raw):
+        char = raw[i]
+        if char == "\\" and (in_single or in_double) and i + 1 < len(raw):
+            # A backslash escapes the next character inside a quoted
+            # string: an escaped quote must not toggle the quote state.
+            i += 2
+            continue
         if char == "'" and not in_double:
             in_single = not in_single
         elif char == '"' and not in_single:
@@ -162,12 +184,13 @@ def _strip_comment(raw: str) -> str:
             and (i == 0 or raw[i - 1] in " \t")
         ):
             return raw[:i]
+        i += 1
     return raw
 
 
 def _parse_block(
     lines: list[tuple[int, str, int]], index: int, indent: int
-) -> tuple[object, int]:
+) -> tuple[Any, int]:
     if index >= len(lines):
         return None, index
     line_indent, content, _line_no = lines[index]
@@ -189,16 +212,17 @@ def _is_mapping_line(content: str) -> bool:
 
 def _parse_mapping(
     lines: list[tuple[int, str, int]], index: int, indent: int
-) -> tuple[dict, int]:
-    result: dict = {}
+) -> tuple[dict[str, Any], int]:
+    result: dict[str, Any] = {}
     while index < len(lines):
         line_indent, content, line_no = lines[index]
         if line_indent != indent or not _is_mapping_line(content):
             break
         key, _, rest = content.partition(":")
-        key = _parse_scalar(key.strip())
-        if not isinstance(key, str):
+        parsed_key = _parse_scalar(key.strip())
+        if not isinstance(parsed_key, str):
             raise ConfigError(f"mapping key must be a string (line {line_no})")
+        key = parsed_key
         rest = rest.strip()
         if rest in ("|", ">", "|-", "|+", ">-", ">+"):
             # Block scalar: following more-indented lines are one string.
@@ -211,14 +235,14 @@ def _parse_mapping(
                 block_lines.append(lines[j][1])
                 j += 1
             if rest.startswith("|"):
-                value: object = "\n".join(block_lines)
+                block_value = "\n".join(block_lines)
                 if not rest.endswith("-"):
-                    value += "\n"
+                    block_value += "\n"
             else:
-                value = " ".join(block_lines)
+                block_value = " ".join(block_lines)
                 if not rest.endswith("-"):
-                    value += "\n"
-            result[key] = value
+                    block_value += "\n"
+            result[key] = block_value
             index = j
         elif rest:
             result[key] = _parse_scalar(rest)
@@ -235,8 +259,8 @@ def _parse_mapping(
 
 def _parse_sequence(
     lines: list[tuple[int, str, int]], index: int, indent: int
-) -> tuple[list, int]:
-    result: list = []
+) -> tuple[list[Any], int]:
+    result: list[Any] = []
     while index < len(lines):
         line_indent, content, line_no = lines[index]
         if line_indent != indent or not (content.startswith("- ") or content == "-"):
