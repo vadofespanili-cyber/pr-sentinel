@@ -1,15 +1,12 @@
 name: PR review
 
-
 on:
   pull_request:
     types: [opened, synchronize]
 
-
 permissions:
   pull-requests: write
   contents: read
-
 
 jobs:
   review:
@@ -20,4 +17,3 @@ jobs:
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
           reviewed_commit: ${{ github.event.pull_request.head.sha }}
-
