@@ -62,9 +62,11 @@ could not be verified and was ignored.
 - `ruff check` and `ruff format` clean.
 - `mypy --strict` clean on `src/pr_sentinel`.
 - CLI smoke test: `pr-sentinel 0.1.2` and `check-config` work.
-- Not yet verified live: the action has not run on a real pull request
-  with v0.1.2 yet — that happens when v0.1.2 is published and the
-  self-review workflow is upgraded to it.
+- Verified live: the action ran on real PR #2 with v0.1.2
+  (self-review workflow pinned to @v0.1.2) and posted its review
+  ("No findings. Nothing to report — the changes look clean."),
+  which was correct for the docs-only change; the PR was then merged.
+  All 5 checks passed (CI on Python 3.10–3.13 + the PR review).
 
 ## Not fixed / known limitations
 
