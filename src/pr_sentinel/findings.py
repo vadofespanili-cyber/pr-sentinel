@@ -31,7 +31,7 @@ class Finding:
         if self.line is not None and self.line < 1:
             raise ValueError(f"line must be >= 1, got {self.line!r}")
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str | int | None]:
         """Plain dict for JSON output."""
         return {
             "severity": self.severity,
