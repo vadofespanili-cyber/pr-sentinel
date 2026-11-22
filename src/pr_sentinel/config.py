@@ -49,10 +49,13 @@ class Config:
     api_base_url: str = DEFAULT_API_BASE_URL
 
     def __post_init__(self) -> None:
-        # "none" is a user-friendly spelling of "no gate"; normalize it
-        # so the rest of the code only ever sees None or a severity.
-        if self.fail_on_severity == "none":
-            self.fail_on_severity = None
+        # Normalize the gate: case- and whitespace-insensitive, and
+        # "none" and "" both mean "no gate", so the rest of the code
+        # only ever sees None or a lowercase severity. (An empty string
+        # arrives from action.yml when the input is left blank.)
+        if isinstance(self.fail_on_severity, str):
+            normalized = self.fail_on_severity.strip().lower()
+            self.fail_on_severity = None if normalized in ("", "none") else normalized
 
     def validate(self) -> None:
         if not isinstance(self.model, str) or not self.model:
