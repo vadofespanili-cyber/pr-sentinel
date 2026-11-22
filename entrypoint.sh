@@ -29,8 +29,15 @@ fi
 # The repository input defaults to the repo that triggered the run.
 REPO="${INPUT_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
 
+# Build the CLI invocation; optional inputs are forwarded only when set.
+set -- review --repo "$REPO" --pr "$PR_NUMBER"
 if [ -n "${INPUT_CONFIG_PATH:-}" ]; then
-  exec pr-sentinel review --repo "$REPO" --pr "$PR_NUMBER" --config "${INPUT_CONFIG_PATH}"
-else
-  exec pr-sentinel review --repo "$REPO" --pr "$PR_NUMBER"
+  set -- "$@" --config "${INPUT_CONFIG_PATH}"
 fi
+if [ -n "${INPUT_FAIL_ON_SEVERITY:-}" ]; then
+  set -- "$@" --fail-on-severity "${INPUT_FAIL_ON_SEVERITY}"
+fi
+if [ -n "${INPUT_SARIF_OUT:-}" ]; then
+  set -- "$@" --sarif-out "${INPUT_SARIF_OUT}"
+fi
+exec pr-sentinel "$@"
