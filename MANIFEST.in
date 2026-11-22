@@ -1,0 +1,4 @@
+# Keep the test suite out of the sdist: tests ship with the repository,
+# not with the published package.
+prune tests
+global-exclude *.py[cod]

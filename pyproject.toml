@@ -1,20 +1,20 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pr-sentinel"
-version = "0.2.1"
+name = "pr-sentinel-ai"
+version = "0.2.2"
 description = "AI-powered pull request review bot: GitHub Action and CLI"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Jalal" }]
+license = "MIT"
+authors = [{ name = "Jalal", email = "vadofespanili@gmail.com" }]
 keywords = ["github", "code-review", "ai", "pull-request"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -27,6 +27,10 @@ classifiers = [
 Homepage = "https://github.com/vadofespanili-cyber/pr-sentinel"
 Repository = "https://github.com/vadofespanili-cyber/pr-sentinel"
 Issues = "https://github.com/vadofespanili-cyber/pr-sentinel/issues"
+Changelog = "https://github.com/vadofespanili-cyber/pr-sentinel/releases"
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "mypy"]
 
 [project.scripts]
 pr-sentinel = "pr_sentinel.cli:main"

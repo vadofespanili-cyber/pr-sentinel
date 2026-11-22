@@ -11,7 +11,7 @@ Responses-compatible API) and deterministic static checks. It finds bugs,
 security issues and performance problems, posts a summary comment, adds
 line-level review comments, and can also run fully locally on a patch file.
 
-![pr-sentinel inline review comment on an experimental PR](docs/screenshots/pr5-inline-comment.png)
+![pr-sentinel inline review comment on an experimental PR](https://raw.githubusercontent.com/vadofespanili-cyber/pr-sentinel/main/docs/screenshots/pr5-inline-comment.png)
 
 *Live review on an experimental PR: the AI reviewer caught an off-by-one
 bug on line 16 that the deterministic static checks could not see.*
@@ -21,7 +21,7 @@ bug on line 16 that the deterministic static checks could not see.*
 The same review as a summary comment on the pull request — one
 high-severity finding, in a table:
 
-![pr-sentinel summary comment on an experimental PR](docs/screenshots/pr5-summary-comment.png)
+![pr-sentinel summary comment on an experimental PR](https://raw.githubusercontent.com/vadofespanili-cyber/pr-sentinel/main/docs/screenshots/pr5-summary-comment.png)
 
 Both screenshots come from a real review of an experimental PR that
 intentionally contained two logic bugs; the reviewer caught one of them
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.1
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.2
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
 ```
@@ -88,7 +88,7 @@ A full example is in [examples/github-workflow.yml](examples/github-workflow.yml
 ## Quick start — CLI
 
 ```bash
-pip install git+https://github.com/vadofespanili-cyber/pr-sentinel.git
+pip install pr-sentinel-ai
 export PR_SENTINEL_API_KEY="sk-..."
 export GITHUB_TOKEN="ghp_..."
 
@@ -176,7 +176,7 @@ findings that were reported, so with the default threshold `medium` a
 show up in GitHub code scanning. Upload it in a later step:
 
 ```yaml
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.1
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.2
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
           sarif_out: pr-sentinel.sarif
@@ -283,9 +283,9 @@ design decisions.
 
 Versioned releases live on the
 [Releases page](https://github.com/vadofespanili-cyber/pr-sentinel/releases).
-The current release is **v0.2.1** — see the
+The current release is **v0.2.2** — see the
 [Changelog](CHANGELOG.md) and the
-[release notes](docs/release-notes-v0.2.1.md) for what it includes.
+[release notes](docs/release-notes-v0.2.2.md) for what it includes.
 v0.1.2 was driven by an independent external review (Google Gemini 4
 Neon); the full review is in
 [docs/reviews/gemini-2026-11-22.md](docs/reviews/gemini-2026-11-22.md).

@@ -3,6 +3,23 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] - 2026-11-23
+
+### Changed
+
+- **Renamed the distribution to `pr-sentinel-ai`.** The PyPI name
+  `pr-sentinel` is taken by an unrelated tool, and an action named
+  "PR Sentinel" already exists on the GitHub Marketplace, so the
+  distribution name and the Marketplace action name are now
+  `pr-sentinel-ai` — install with `pip install pr-sentinel-ai`.
+  Nothing else changes: the Python import package stays
+  `pr_sentinel`, the console command stays `pr-sentinel`, and the
+  GitHub repository stays `vadofespanili-cyber/pr-sentinel`. This is
+  the first release under the new name; it will be the first version
+  published to PyPI and to the GitHub Marketplace.
+- The example workflow (`examples/github-workflow.yml`) now pins
+  `@v0.2.2`.
+
 ## [0.2.1] - 2026-11-23
 
 ### Added
