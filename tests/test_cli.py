@@ -462,6 +462,80 @@ def test_review_dry_run_posts_nothing(
     assert json_out.is_file()
 
 
+# --- Reviewed commit line (v0.2.1) ------------------------------------------
+
+
+def test_review_diff_reviewed_commit_line_in_summary(tmp_path, monkeypatch, capsys):
+    """--reviewed-commit adds the "Reviewed commit: <short-sha>" line
+    to the printed summary (and the hidden marker stays last)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+
+    code = main(
+        [
+            "review-diff",
+            "--file",
+            str(patch),
+            "--reviewed-commit",
+            "abc1234def567890",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Reviewed commit: abc1234" in out
+    assert "Reviewed by pr-sentinel" in out
+    assert out.rstrip("\n").splitlines()[-1] == SUMMARY_MARKER
+
+
+def test_review_diff_without_reviewed_commit_omits_line(tmp_path, monkeypatch, capsys):
+    """Without --reviewed-commit the summary has no commit line at all."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+
+    code = main(["review-diff", "--file", str(patch)])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Reviewed commit:" not in out
+    assert "Reviewed by pr-sentinel" in out
+
+
+def test_review_reviewed_commit_line_in_summary(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """--reviewed-commit on `review` is threaded into the summary."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    config = _write_config(tmp_path, model_server)
+
+    code = main(
+        [
+            "review",
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--config",
+            str(config),
+            "--dry-run",
+            "--reviewed-commit",
+            "deadbee1234567",
+        ]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Reviewed commit: deadbee" in out
+    assert out.rstrip("\n").splitlines()[-1] == SUMMARY_MARKER
+
+
 def test_review_summary_mode_posts_issue_comment_not_review(
     tmp_path,
     monkeypatch,
