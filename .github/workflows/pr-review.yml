@@ -16,3 +16,4 @@ jobs:
       - uses: vadofespanili-cyber/pr-sentinel@v0.2.0
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
+          reviewed_commit: ${{ github.event.pull_request.head.sha }}
