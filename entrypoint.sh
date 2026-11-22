@@ -29,15 +29,27 @@ fi
 # The repository input defaults to the repo that triggered the run.
 REPO="${INPUT_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
 
+# Trim leading/trailing whitespace (POSIX parameter expansion, works
+# in dash): a whitespace-only input counts as empty and is not
+# forwarded to the CLI.
+_trim_ws() {
+  _v=$1
+  _v=${_v#"${_v%%[![:space:]]*}"}
+  _v=${_v%"${_v##*[![:space:]]}"}
+  printf '%s' "$_v"
+}
+
 # Build the CLI invocation; optional inputs are forwarded only when set.
 set -- review --repo "$REPO" --pr "$PR_NUMBER"
 if [ -n "${INPUT_CONFIG_PATH:-}" ]; then
   set -- "$@" --config "${INPUT_CONFIG_PATH}"
 fi
-if [ -n "${INPUT_FAIL_ON_SEVERITY:-}" ]; then
-  set -- "$@" --fail-on-severity "${INPUT_FAIL_ON_SEVERITY}"
+FAIL_ON_SEVERITY=$(_trim_ws "${INPUT_FAIL_ON_SEVERITY:-}")
+if [ -n "$FAIL_ON_SEVERITY" ]; then
+  set -- "$@" --fail-on-severity "$FAIL_ON_SEVERITY"
 fi
-if [ -n "${INPUT_SARIF_OUT:-}" ]; then
-  set -- "$@" --sarif-out "${INPUT_SARIF_OUT}"
+SARIF_OUT=$(_trim_ws "${INPUT_SARIF_OUT:-}")
+if [ -n "$SARIF_OUT" ]; then
+  set -- "$@" --sarif-out "$SARIF_OUT"
 fi
 exec pr-sentinel "$@"
