@@ -24,6 +24,18 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str, str, str]] = [
         ),
     ),
     (
+        # Newer OpenAI project keys (sk-proj-...): the generic pattern
+        # above cannot match them, because the dash after "sk-" breaks
+        # its [A-Za-z0-9] run.
+        re.compile(r"sk-proj-[A-Za-z0-9_-]{20,}"),
+        "leaked-openai-key",
+        "Possible OpenAI API key in added code.",
+        (
+            "Remove the key, revoke it, and load it from an environment "
+            "variable or a secret store instead."
+        ),
+    ),
+    (
         re.compile(r"(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+"),
         "leaked-github-token",
         "Possible GitHub token in added code.",
@@ -78,7 +90,7 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str, str, str, str, str]] = [
     (
         re.compile(r"\beval\s*\("),
         "high",
-        "bug",
+        "security",
         "dangerous-eval",
         "Use of eval() on added code.",
         "Avoid eval(); parse or validate the input explicitly instead.",
@@ -86,7 +98,7 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str, str, str, str, str]] = [
     (
         re.compile(r"\bexec\s*\("),
         "high",
-        "bug",
+        "security",
         "dangerous-exec",
         "Use of exec() on added code.",
         "Avoid exec(); call the intended function directly instead.",
