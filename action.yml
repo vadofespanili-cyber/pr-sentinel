@@ -9,7 +9,8 @@ inputs:
     default: ${{ github.token }}
   api_key:
     description: "API key for the Responses-compatible model provider"
-    required: true
+    required: false
+    default: ""
   repository:
     description: "Repository as OWNER/REPO"
     required: false
