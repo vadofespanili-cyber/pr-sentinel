@@ -11,6 +11,23 @@ Responses-compatible API) and deterministic static checks. It finds bugs,
 security issues and performance problems, posts a summary comment, adds
 line-level review comments, and can also run fully locally on a patch file.
 
+![pr-sentinel inline review comment on an experimental PR](docs/screenshots/pr5-inline-comment.png)
+
+*Live review on an experimental PR: the AI reviewer caught an off-by-one
+bug on line 16 that the deterministic static checks could not see.*
+
+## See it in action
+
+The same review as a summary comment on the pull request — one
+high-severity finding, in a table:
+
+![pr-sentinel summary comment on an experimental PR](docs/screenshots/pr5-summary-comment.png)
+
+Both screenshots come from a real review of an experimental PR that
+intentionally contained two logic bugs; the reviewer caught one of them
+(the off-by-one above) and missed the other (an unbounded in-memory
+cache).
+
 ## Why pr-sentinel?
 
 Code review is the bottleneck of open-source maintenance. Maintainers
@@ -54,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.0
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.1
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
 ```
@@ -159,7 +176,7 @@ findings that were reported, so with the default threshold `medium` a
 show up in GitHub code scanning. Upload it in a later step:
 
 ```yaml
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.0
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.1
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
           sarif_out: pr-sentinel.sarif
@@ -184,7 +201,10 @@ posting another one. In `inline` mode the line comments are posted as
 a review only when there is at least one inline comment to post, with
 a brief body pointing at the summary comment. A review with no
 findings updates the summary comment to "No findings" instead of
-leaving a stale findings table behind.
+leaving a stale findings table behind. When the Action runs, the
+summary also shows the reviewed commit (`Reviewed commit:
+<short-sha>`) at the bottom, so readers can see at a glance which
+commit the review covers.
 
 ## Example output
 
@@ -263,9 +283,9 @@ design decisions.
 
 Versioned releases live on the
 [Releases page](https://github.com/vadofespanili-cyber/pr-sentinel/releases).
-The current release is **v0.2.0** — see the
+The current release is **v0.2.1** — see the
 [Changelog](CHANGELOG.md) and the
-[release notes](docs/release-notes-v0.2.0.md) for what it includes.
+[release notes](docs/release-notes-v0.2.1.md) for what it includes.
 v0.1.2 was driven by an independent external review (Google Gemini 4
 Neon); the full review is in
 [docs/reviews/gemini-2026-11-22.md](docs/reviews/gemini-2026-11-22.md).
