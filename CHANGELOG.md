@@ -3,6 +3,79 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-11-22
+
+Fixes for every verified finding from an independent external review of
+v0.1.1 (Google Gemini 4 Neon; full text in
+`docs/reviews/gemini-2026-11-22.md`).
+
+### Fixed
+
+- **Review pipeline order.** Ignored files (`ignore_paths`) are now
+  dropped right after parsing, before the `max_files` limit and before
+  any review work — they no longer consume the file quota or AI tokens.
+  The size limit is applied after parsing by dropping whole trailing
+  hunks/files, never by cutting the raw diff mid-hunk (a single hunk
+  larger than the limit is kept whole, with a warning).
+- **Empty tokens rejected.** An empty-string `GITHUB_TOKEN` is now
+  rejected with the clear "GITHUB_TOKEN is not set" error in the CLI and
+  in `GitHubClient`, instead of being sent as an empty Bearer header and
+  failing with a confusing 401. `entrypoint.sh` no longer exports an
+  empty token either.
+- **`entrypoint.sh` robustness.** A null `pull_request` in the event
+  JSON no longer crashes the script; `--repo` falls back to
+  `$GITHUB_REPOSITORY` when the input is empty; the stale `pr-number`
+  wording in the error message is fixed to `pr_number`.
+- **`action.yml`:** `api_key` is now `required: false` (default `""`),
+  matching the CLI's static-only mode, which needs no key.
+- **`api_base_url` validation.** The value must now parse as a real URL
+  with an `http`/`https` scheme and a host (`httpfoo` is rejected);
+  plain `http://` is still allowed for local test servers, but the CLI
+  warns that the API key is sent in cleartext when the AI reviewer runs.
+- **YAML comment parser.** A backslash-escaped quote (`\"`) inside a
+  quoted string no longer toggles the quote state and truncates the
+  value at a following `#`.
+- **Filenames with spaces.** `diff --git` headers with C-style-quoted
+  paths (`"a/my file.txt"`) are parsed correctly, including in the
+  `---`/`+++` lines; previously the path was wrong, mainly for new and
+  deleted files.
+- **Inline comments on context lines.** `new_line_position` now maps
+  context lines too (they exist in the new file), so an AI finding on a
+  context line gets an inline comment instead of being silently dropped
+  from the comment list.
+- **GitHub client errors.** `json.JSONDecodeError` and `TimeoutError`
+  are converted to `GitHubError` instead of crashing unhandled.
+- **AI reply parsing.** One model entry with an invalid line number
+  (0 or negative) no longer kills the whole chunk's parse; the single
+  bad item is skipped.
+- **Prompt injection hardening.** The diff is wrapped in explicit
+  delimiters and the prompt states that the diff is untrusted data and
+  any instructions inside it must be ignored.
+- **Static checks.** New OpenAI project keys (`sk-proj-...`) are now
+  detected, and `eval()`/`exec()` findings are categorized as
+  `security` instead of `bug`.
+- **Reporter.** Inline comments now use the modern `line` + `side`
+  fields instead of the legacy `position` field. The summary note now
+  says which kind of findings these are: the "AI-generated" note
+  appears only when the AI reviewer ran; static-only reviews say the
+  findings are from deterministic static checks.
+- **Dockerfile.** The base image is pinned to `python:3.12.16-slim`
+  by SHA256 digest (verified against Docker Hub), so rebuilds are
+  reproducible.
+- Removed dead code: the unused `cur_paths` variable in `chunk_diff`.
+- `mypy --strict` is now clean (31 errors fixed, mostly pre-existing
+  bare-generic annotations; annotation-only changes, no behaviour
+  change).
+
+### Added
+
+- **Retries with backoff.** Transient failures are retried up to 3
+  attempts with exponential backoff (1s, 2s): HTTP 429 and 5xx in both
+  the GitHub client and the AI reviewer (honoring `Retry-After` on
+  429), plus network errors and timeouts. Delays are capped at 60s.
+- 30 new regression tests (113 total), including entrypoint tests run
+  under `sh` and retry tests against scripted fake servers.
+
 ## [0.1.1] - 2026-11-22
 
 ### Fixed
