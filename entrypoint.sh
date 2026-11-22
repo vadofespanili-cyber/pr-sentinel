@@ -52,4 +52,8 @@ SARIF_OUT=$(_trim_ws "${INPUT_SARIF_OUT:-}")
 if [ -n "$SARIF_OUT" ]; then
   set -- "$@" --sarif-out "$SARIF_OUT"
 fi
+REVIEWED_COMMIT=$(_trim_ws "${INPUT_REVIEWED_COMMIT:-}")
+if [ -n "$REVIEWED_COMMIT" ]; then
+  set -- "$@" --reviewed-commit "$REVIEWED_COMMIT"
+fi
 exec pr-sentinel "$@"
