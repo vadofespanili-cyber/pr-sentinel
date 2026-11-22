@@ -11,6 +11,7 @@ from typing import ClassVar
 import pytest
 
 import pr_sentinel.cli as cli_module
+from pr_sentinel import __version__
 from pr_sentinel.cli import main
 from pr_sentinel.findings import Finding
 
@@ -279,7 +280,7 @@ def test_version(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["--version"])
     assert excinfo.value.code == 0
-    assert "pr-sentinel 0.1.0" in capsys.readouterr().out
+    assert f"pr-sentinel {__version__}" in capsys.readouterr().out
 
 
 # --- review-diff -------------------------------------------------------------
