@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.request
 
 DEFAULT_BASE_URL = "https://api.github.com"
-USER_AGENT = "pr-sentinel/0.1.0"
+USER_AGENT = "pr-sentinel/0.1.1"
 API_VERSION = "2022-11-28"
 
 
