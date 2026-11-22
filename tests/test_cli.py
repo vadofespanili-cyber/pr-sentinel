@@ -68,7 +68,9 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._record()
         parsed = urlparse(self.path)
-        if parsed.path == "/repos/o/r/issues/1/comments":
+        if parsed.path == "/user":
+            _send_json(self, 200, {"login": "github-actions[bot]", "type": "Bot"})
+        elif parsed.path == "/repos/o/r/issues/1/comments":
             page = int(parse_qs(parsed.query).get("page", ["1"])[0])
             start = (page - 1) * 100
             _send_json(self, 200, FakeGitHubHandler.issue_comments[start : start + 100])
@@ -754,6 +756,68 @@ def test_review_diff_fail_on_severity_invalid_value_exits_2(tmp_path, monkeypatc
     assert excinfo.value.code == 2
 
 
+def test_review_diff_fail_on_severity_uppercase_cli_value(tmp_path, monkeypatch):
+    """The CLI gate value is case-insensitive: --fail-on-severity HIGH
+    works like "high"."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+
+    code = main(["review-diff", "--file", str(patch), "--fail-on-severity", "HIGH"])
+    assert code == 1
+
+
+def test_review_diff_gate_below_threshold_warns(tmp_path, monkeypatch, capsys):
+    """A gate lower than severity_threshold warns on stderr: findings
+    below the threshold are filtered out before the gate runs, so the
+    gate can never fire on them."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text("fail_on_severity: low\n", encoding="utf-8")
+
+    code = main(["review-diff", "--file", str(patch), "--config", str(config)])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "fail_on_severity=low is lower" in err
+    assert "severity_threshold=medium" in err
+
+
+def test_review_diff_gate_at_or_above_threshold_no_warning(
+    tmp_path, monkeypatch, capsys
+):
+    """No threshold warning when the gate is at or above the reporting
+    threshold (or when the thresholds are equal)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "fail_on_severity: high\nseverity_threshold: high\n", encoding="utf-8"
+    )
+
+    code = main(["review-diff", "--file", str(patch), "--config", str(config)])
+    assert code == 1
+    assert "is lower" not in capsys.readouterr().err
+
+
+def test_gate_message_uses_singular_and_plural(capsys):
+    """The gate stderr message says "1 finding meets" but
+    "N findings meet"."""
+    from pr_sentinel.cli import _finish_outputs
+
+    one = [Finding("high", "bug", "a.py", 1, "One.")]
+    assert _finish_outputs(one, None, "high") == 1
+    assert "1 finding meets or exceeds the threshold" in capsys.readouterr().err
+    two = [
+        Finding("high", "bug", "a.py", 1, "One."),
+        Finding("critical", "security", "b.py", 2, "Two."),
+    ]
+    assert _finish_outputs(two, None, "high") == 1
+    assert "2 findings meet or exceed the threshold" in capsys.readouterr().err
+
+
 def test_review_fail_on_severity_posts_before_exit_1(
     tmp_path,
     monkeypatch,
@@ -881,7 +945,11 @@ def test_review_updates_existing_summary_comment(
     monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
     monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
     FakeGitHubHandler.issue_comments.append(
-        {"id": 7, "body": f"{SUMMARY_MARKER}\nOld summary."}
+        {
+            "id": 7,
+            "body": f"{SUMMARY_MARKER}\nOld summary.",
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+        }
     )
     config = _write_config(tmp_path, model_server)
 
@@ -916,7 +984,11 @@ def test_review_summary_comment_pagination(
         {"id": i, "body": f"comment {i}"} for i in range(100)
     )
     FakeGitHubHandler.issue_comments.append(
-        {"id": 101, "body": f"{SUMMARY_MARKER}\nOld summary."}
+        {
+            "id": 101,
+            "body": f"{SUMMARY_MARKER}\nOld summary.",
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+        }
     )
     config = _write_config(tmp_path, model_server)
 
@@ -933,14 +1005,49 @@ def test_review_summary_comment_pagination(
     assert updated[0]["path"] == "/repos/o/r/issues/comments/101"
 
 
+def test_review_spoofed_marker_comment_is_not_updated(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """End to end: the only marker comment belongs to another user, so
+    the bot creates a fresh summary instead of PATCHing theirs."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    FakeGitHubHandler.issue_comments.append(
+        {
+            "id": 42,
+            "body": f"{SUMMARY_MARKER}\nQuoted by a human.",
+            "user": {"login": "mallory", "type": "User"},
+        }
+    )
+    config = _write_config(tmp_path, model_server)
+
+    code = main(["review", "--repo", "o/r", "--pr", "1", "--config", str(config)])
+    assert code == 0
+    assert _issue_comments_updated() == []
+    created = _issue_comments_created()
+    assert len(created) == 1
+    assert "Model finding." in json.loads(created[0]["body"])["body"]
+
+
 class _StubClient:
     """Records GitHub calls for direct _post_review tests."""
 
-    def __init__(self):
+    def __init__(self, authenticated_login: str = "github-actions[bot]"):
+        self.authenticated_login = authenticated_login
         self.created: list[str] = []
         self.updated: list[tuple[int, str]] = []
         self.reviews: list[tuple[str, list]] = []
         self.listed_comments: list[dict] = []
+
+    def get_authenticated_user(self) -> dict:
+        return {"login": self.authenticated_login, "type": "Bot"}
 
     def list_issue_comments(self, owner, repo, number):
         return self.listed_comments
@@ -991,11 +1098,118 @@ def test_post_review_zero_findings_still_updates_summary():
     """A clean re-push updates the summary comment to 'No findings'
     instead of leaving a stale findings table behind."""
     client = _StubClient()
-    client.listed_comments = [{"id": 5, "body": f"{SUMMARY_MARKER}\nOld table."}]
+    client.listed_comments = [
+        {
+            "id": 5,
+            "body": f"{SUMMARY_MARKER}\nOld table.",
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+        }
+    ]
     _post_review(client, "o", "r", 1, Config(), "No findings.", [], [])
     assert client.created == []
     assert client.updated == [(5, "No findings.")]
     assert client.reviews == []
+
+
+def test_post_review_ignores_spoofed_marker_comment():
+    """A marker quoted by another user is never updated: the bot only
+    PATCHes its own summary, and picks the bot-authored one."""
+    client = _StubClient()
+    client.listed_comments = [
+        {
+            "id": 9,
+            "body": f"{SUMMARY_MARKER}\nQuoted by a human.",
+            "user": {"login": "mallory", "type": "User"},
+        },
+        {
+            "id": 10,
+            "body": f"{SUMMARY_MARKER}\nBot's own summary.",
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+        },
+    ]
+    _post_review(client, "o", "r", 1, Config(), "New summary.", [], [])
+    assert client.created == []
+    assert client.updated == [(10, "New summary.")]
+
+
+def test_post_review_spoofed_marker_only_creates_new():
+    """When the only marker comment belongs to someone else, a fresh
+    summary is created instead of PATCHing a stranger's comment."""
+    client = _StubClient()
+    client.listed_comments = [
+        {
+            "id": 9,
+            "body": f"{SUMMARY_MARKER}\nQuoted by a human.",
+            "user": {"login": "mallory", "type": "User"},
+        }
+    ]
+    _post_review(client, "o", "r", 1, Config(), "New summary.", [], [])
+    assert client.created == ["New summary."]
+    assert client.updated == []
+
+
+def test_post_review_updates_comment_by_authenticated_login():
+    """A marker comment by the token user (personal-access-token run,
+    not a bot) is still recognized as ours and updated in place."""
+    client = _StubClient(authenticated_login="octocat-human")
+    client.listed_comments = [
+        {
+            "id": 11,
+            "body": f"{SUMMARY_MARKER}\nMy own summary.",
+            "user": {"login": "octocat-human", "type": "User"},
+        }
+    ]
+    _post_review(client, "o", "r", 1, Config(), "New summary.", [], [])
+    assert client.created == []
+    assert client.updated == [(11, "New summary.")]
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_post_review_update_forbidden_or_gone_falls_back_to_create(monkeypatch, status):
+    """If PATCHing the summary fails with 403/404 (comment deleted, or
+    the token lost write access), a fresh summary is created instead of
+    crashing the review with exit code 3."""
+    from pr_sentinel.github_client import GitHubError
+
+    client = _StubClient()
+    client.listed_comments = [
+        {
+            "id": 5,
+            "body": f"{SUMMARY_MARKER}\nOld summary.",
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+        }
+    ]
+
+    def _raise(*args, **kwargs):
+        raise GitHubError("update failed", status=status)
+
+    monkeypatch.setattr(client, "update_issue_comment", _raise)
+    _post_review(client, "o", "r", 1, Config(), "New summary.", [], [])
+    assert client.created == ["New summary."]
+    assert client.updated == []
+
+
+def test_post_review_update_other_error_still_raises(monkeypatch):
+    """A non-403/404 update failure is still an error, not a silent
+    fallback: only the known-race statuses fall back to create."""
+    from pr_sentinel.github_client import GitHubError
+
+    client = _StubClient()
+    client.listed_comments = [
+        {
+            "id": 5,
+            "body": f"{SUMMARY_MARKER}\nOld summary.",
+            "user": {"login": "github-actions[bot]", "type": "Bot"},
+        }
+    ]
+
+    def _raise(*args, **kwargs):
+        raise GitHubError("server error", status=500)
+
+    monkeypatch.setattr(client, "update_issue_comment", _raise)
+    with pytest.raises(GitHubError):
+        _post_review(client, "o", "r", 1, Config(), "New summary.", [], [])
+    assert client.created == []
 
 
 # --- SARIF output (v0.2.0) ----------------------------------------------------
@@ -1063,10 +1277,14 @@ def test_review_diff_sarif_out_empty_findings(tmp_path, monkeypatch, capsys):
 
 
 def test_review_diff_sarif_out_unwritable_exits_2(tmp_path, monkeypatch, capsys):
-    """An unwritable SARIF path is a usage error (exit 2)."""
+    """An unwritable SARIF path is a usage error (exit 2). A missing
+    parent directory is auto-created (see below), so the unwritable
+    target here is a path under a regular file."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
     patch = _write_eval_patch(tmp_path)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
 
     code = main(
         [
@@ -1074,11 +1292,40 @@ def test_review_diff_sarif_out_unwritable_exits_2(tmp_path, monkeypatch, capsys)
             "--file",
             str(patch),
             "--sarif-out",
-            str(tmp_path / "no-such-dir" / "report.sarif"),
+            str(blocker / "report.sarif"),
         ]
     )
     assert code == 2
     assert "error" in capsys.readouterr().err
+
+
+def test_review_diff_outputs_create_parent_dirs(tmp_path, monkeypatch, capsys):
+    """--sarif-out and --json-out into a non-existent nested directory
+    create the parent directories and write the files."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    patch = _write_eval_patch(tmp_path)
+    sarif_out = tmp_path / "reports" / "sentinel.sarif"
+    json_out = tmp_path / "reports" / "findings.json"
+
+    code = main(
+        [
+            "review-diff",
+            "--file",
+            str(patch),
+            "--sarif-out",
+            str(sarif_out),
+            "--json-out",
+            str(json_out),
+        ]
+    )
+    assert code == 0
+    assert sarif_out.is_file()
+    assert json_out.is_file()
+    parsed = json.loads(sarif_out.read_text(encoding="utf-8"))
+    assert parsed["version"] == "2.1.0"
+    assert len(parsed["runs"][0]["results"]) == 1
+    assert len(json.loads(json_out.read_text(encoding="utf-8"))) == 1
 
 
 def test_review_sarif_out_written(
