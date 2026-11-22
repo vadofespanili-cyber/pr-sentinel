@@ -3,13 +3,32 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.1] - 2026-11-23
+
+### Added
+
+- **Reviewed commit line in the summary comment.** The summary now
+  ends with `Reviewed commit: <short-sha>` (first 7 characters of
+  the reviewed commit), so readers can see at a glance which commit
+  a review covers — especially after re-pushes, when the comment is
+  updated in place. Set it with the `reviewed_commit` Action input
+  (the self-review workflow passes
+  `${{ github.event.pull_request.head.sha }}`), or `--reviewed-commit`
+  on `review` / `review-diff`. It is optional: without it the summary
+  is byte-identical to v0.2.0. The full merge-commit SHA is never
+  used as a fallback — for `pull_request` events `GITHUB_SHA` is the
+  merge commit, not the reviewed head, and would be misleading.
+- **Real review screenshots in the README.** The top of the README
+  now shows the bot's live inline comment and summary comment from
+  experimental PR #5 (in `docs/screenshots/`).
 
 ### Changed
 
 - Bumped `actions/checkout` from v4 to v5 and `actions/setup-python`
   from v5 to v6 in the CI and self-review workflows (removes the
   Node.js 20 deprecation warnings).
+- The example workflow (`examples/github-workflow.yml`) now pins
+  `@v0.2.1`.
 
 ## [0.2.0] - 2026-11-22
 
