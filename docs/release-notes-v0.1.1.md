@@ -33,9 +33,10 @@ becomes `github_token`).
   renamed inputs reach the CLI — plus a test documenting that the old
   hyphenated names do not survive dash.
 - `ruff check` and `ruff format` clean.
-- Live verification on the project's own repository is in progress: the
-  self-review workflow was upgraded to v0.1.1 and the action's first live
-  review on PR #1 is being checked.
+- Live verification on the project's own repository: after upgrading the
+  self-review workflow to v0.1.1, the action posted its first live review
+  on PR #1 ("No findings. Nothing to report — the changes look clean."),
+  and the PR was merged.
 
 ## Install
 
