@@ -1,0 +1,38 @@
+[
+  {
+    "severity": "critical",
+    "category": "security",
+    "file": "app.py",
+    "line": 3,
+    "message": "Possible OpenAI API key in added code.",
+    "suggestion": "Remove the key, revoke it, and load it from an environment variable or a secret store instead.",
+    "rule": "leaked-openai-key"
+  },
+  {
+    "severity": "high",
+    "category": "bug",
+    "file": "app.py",
+    "line": 4,
+    "message": "Use of eval() on added code.",
+    "suggestion": "Avoid eval(); parse or validate the input explicitly instead.",
+    "rule": "dangerous-eval"
+  },
+  {
+    "severity": "medium",
+    "category": "performance",
+    "file": "app.py",
+    "line": 6,
+    "message": "Nested loops run 1,000,000 iterations to build a list.",
+    "suggestion": "Use a list comprehension or compute the values lazily.",
+    "rule": "ai-review"
+  },
+  {
+    "severity": "low",
+    "category": "maintainability",
+    "file": "app.py",
+    "line": 6,
+    "message": "Magic number 1000 is used without explanation.",
+    "suggestion": "Extract it into a named constant.",
+    "rule": "ai-review"
+  }
+]
