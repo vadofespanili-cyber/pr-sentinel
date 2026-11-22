@@ -209,6 +209,9 @@ Versioned releases live on the
 The current release is **v0.1.2** — see the
 [Changelog](CHANGELOG.md) and the
 [release notes](docs/release-notes-v0.1.2.md) for what it includes.
+v0.1.2 was driven by an independent external review (Google Gemini 4
+Neon); the full review is in
+[docs/reviews/gemini-2026-11-22.md](docs/reviews/gemini-2026-11-22.md).
 
 ## Development
 
