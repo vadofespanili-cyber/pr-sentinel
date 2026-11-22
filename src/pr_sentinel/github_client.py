@@ -65,6 +65,15 @@ class GitHubClient:
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._authenticated_user: dict[str, Any] | None = None
+
+    def get_authenticated_user(self) -> dict[str, Any]:
+        """The token's user (GET /user), fetched once and cached."""
+        if self._authenticated_user is None:
+            self._authenticated_user = cast(
+                dict[str, Any], self._request("GET", "/user")
+            )
+        return self._authenticated_user
 
     def get_pull(self, owner: str, repo: str, number: int) -> dict[str, Any]:
         """Fetch one pull request."""
