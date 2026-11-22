@@ -5,8 +5,9 @@ now called **pr-sentinel-ai**. Nothing else changes — the Python import
 package stays `pr_sentinel`, the console command stays `pr-sentinel`,
 and the GitHub repository stays
 `vadofespanili-cyber/pr-sentinel`. This is the first release under the
-new name, and the first version published to PyPI and to the GitHub
-Marketplace.
+new name, and the first version listed on the GitHub Marketplace.
+PyPI publication follows once the trusted publisher is set up
+(see `docs/publishing.md`).
 
 ## What is new
 
@@ -33,10 +34,11 @@ pip install pr-sentinel-ai
 - The package builds cleanly and passes `twine check`; the test
   suite is excluded from the sdist by `MANIFEST.in` (it contains fake
   credential fixtures that must not ship).
-- A `.github/workflows/publish.yml` workflow publishes to PyPI via
-  Trusted Publishing (OIDC, no stored token) whenever a GitHub
-  release is published. See `docs/publishing.md` for the full
-  checklist.
+- A `.github/workflows/publish.yml` workflow (Trusted Publishing via
+  OIDC, no stored token) will publish to PyPI whenever a GitHub
+  release is published — it lands in a small follow-up once the PyPI
+  trusted publisher for `pr-sentinel-ai` is registered. See
+  `docs/publishing.md` for the full checklist.
 
 ## Verification
 
