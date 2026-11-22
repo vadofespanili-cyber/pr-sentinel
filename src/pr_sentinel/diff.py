@@ -54,10 +54,15 @@ class DiffFile:
     is_deleted: bool = False
 
     def new_line_position(self, new_line_no: int) -> int | None:
-        """Patch position of an added line, or None if it is not in the diff."""
+        """Patch position of a line, or None if it is not in the diff.
+
+        Added and context lines both have a position in the new file, so
+        a finding on either can get an inline comment; only removed lines
+        (which do not exist in the new version) have no position.
+        """
         for hunk in self.hunks:
             for line in hunk.lines:
-                if line.kind == "add" and line.new_no == new_line_no:
+                if line.kind != "del" and line.new_no == new_line_no:
                     return line.position
         return None
 
@@ -89,9 +94,17 @@ def parse_diff(text: str) -> list[DiffFile]:
 
     for raw in text.splitlines():
         if raw.startswith("diff --git "):
-            parts = raw.split(" ")
-            b_path = parts[-1].removeprefix("b/")
-            a_path = parts[-2].removeprefix("a/")
+            parsed_paths = _split_git_paths(raw[len("diff --git ") :])
+            if parsed_paths is None:
+                # Fall back to the old whitespace split for malformed
+                # headers instead of failing the whole parse.
+                parts = raw.split(" ")
+                b_path = parts[-1].removeprefix("b/")
+                a_path = parts[-2].removeprefix("a/")
+            else:
+                a_path, b_path = parsed_paths
+                a_path = a_path.removeprefix("a/")
+                b_path = b_path.removeprefix("b/")
             current = DiffFile(path=b_path, old_path=a_path)
             files.append(current)
             hunk = None
@@ -176,13 +189,12 @@ def chunk_diff(files: list[DiffFile], max_chars: int = 30000) -> list[DiffChunk]
     chunks: list[DiffChunk] = []
     cur_files: list[DiffFile] = []
     cur_text = ""
-    cur_paths: set[str] = set()
 
     def flush() -> None:
-        nonlocal cur_files, cur_text, cur_paths
+        nonlocal cur_files, cur_text
         if cur_text:
             chunks.append(DiffChunk(files=list(cur_files), text=cur_text))
-        cur_files, cur_text, cur_paths = [], "", set()
+        cur_files, cur_text = [], ""
 
     for diff_file in files:
         file_header = (
@@ -210,4 +222,72 @@ def chunk_diff(files: list[DiffFile], max_chars: int = 30000) -> list[DiffChunk]
 def _strip_prefix(value: str, prefix: str) -> str:
     if value == "/dev/null":
         return value
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        # Git C-style-quotes paths with spaces (also in --- /+++ lines).
+        value, _ = _parse_c_quoted(value, 0)
     return value.removeprefix(prefix)
+
+
+def _split_git_paths(rest: str) -> tuple[str, str] | None:
+    """Split the two paths of a ``diff --git`` header.
+
+    Paths containing spaces are C-style double-quoted by git
+    (``"a/my file.txt"``); unquoted paths are split on whitespace.
+    Returns None when the header does not have exactly two paths.
+    """
+    tokens: list[str] = []
+    i = 0
+    while i < len(rest) and len(tokens) < 2:
+        while i < len(rest) and rest[i] in " \t":
+            i += 1
+        if i >= len(rest):
+            break
+        if rest[i] == '"':
+            token, i = _parse_c_quoted(rest, i)
+            tokens.append(token)
+        else:
+            j = i
+            while j < len(rest) and rest[j] not in " \t":
+                j += 1
+            tokens.append(rest[i:j])
+            i = j
+    if len(tokens) != 2:
+        return None
+    return tokens[0], tokens[1]
+
+
+def _parse_c_quoted(text: str, start: int) -> tuple[str, int]:
+    """Parse a C-style double-quoted segment starting at ``start``.
+
+    Handles git's quoting: ``\\"`` and ``\\\\``, ``\\n``/``\\t``, and octal
+    byte escapes (``\\303\\251`` for non-ASCII bytes). Returns the unescaped
+    value and the index just past the closing quote (or the end of the
+    string when unterminated).
+    """
+    raw = bytearray()
+    i = start + 1
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt in "01234567":
+                digits = nxt
+                j = i + 2
+                while j < len(text) and len(digits) < 3 and text[j] in "01234567":
+                    digits += text[j]
+                    j += 1
+                raw.append(int(digits, 8))
+                i = j
+                continue
+            raw.extend(
+                {"n": b"\n", "t": b"\t", '"': b'"', "\\": b"\\"}.get(
+                    nxt, nxt.encode("utf-8")
+                )
+            )
+            i += 2
+            continue
+        if char == '"':
+            return raw.decode("utf-8", errors="replace"), i + 1
+        raw.extend(char.encode("utf-8"))
+        i += 1
+    return raw.decode("utf-8", errors="replace"), i
