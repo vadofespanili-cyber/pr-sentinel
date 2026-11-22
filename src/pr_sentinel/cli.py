@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -92,7 +93,7 @@ def _cmd_review_diff(args: argparse.Namespace) -> int:
         return 2
     try:
         diff_text = Path(args.file).read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         print(f"error: cannot read diff file: {exc}", file=sys.stderr)
         return 2
     return _run_and_report(
@@ -112,7 +113,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         return 2
     owner, repo = parts
     token = github_token_from_env()
-    if token is None:
+    if not token:
         print("error: GITHUB_TOKEN is not set", file=sys.stderr)
         return 3
     client = GitHubClient(token=token)
@@ -128,7 +129,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
     )
     if not args.dry_run:
         if config.mode == "summary":
-            inline: list[dict] = []
+            inline: list[dict[str, str | int]] = []
         else:
             inline = build_inline_comments(findings, files)[
                 : config.max_inline_comments
@@ -169,34 +170,106 @@ def _prepare_review(
     pr_title: str = "",
     pr_number: int | None = None,
 ) -> tuple[str, list[Finding], list[DiffFile]]:
-    """Truncate/limit the diff, collect findings, filter and summarize."""
-    if len(diff_text) > config.max_diff_chars:
-        print(
-            f"warning: diff truncated from {len(diff_text)} to "
-            f"{config.max_diff_chars} characters",
-            file=sys.stderr,
-        )
-        diff_text = diff_text[: config.max_diff_chars]
+    """Parse, limit and review the diff, then filter and summarize.
+
+    Order matters: ignored files are dropped before the file-count limit
+    and before any review work, so they consume neither the ``max_files``
+    quota nor AI tokens. The size limit is applied after parsing, by
+    dropping whole trailing hunks/files — never by cutting raw text
+    mid-hunk.
+    """
     files = parse_diff(diff_text)
+    files = _drop_ignored_files(files, config.ignore_paths)
+    files = _limit_diff_size(files, config.max_diff_chars)
     if len(files) > config.max_files:
         print(
             f"warning: reviewing the first {config.max_files} of {len(files)} files",
             file=sys.stderr,
         )
         files = files[: config.max_files]
+    findings, ai_used = _collect_findings(files, config)
     findings = sort_findings(
-        filter_findings(
-            _collect_findings(files, config),
-            threshold=config.severity_threshold,
-            ignore_paths=config.ignore_paths,
-        )
+        filter_findings(findings, threshold=config.severity_threshold)
     )
-    summary = build_summary(findings, pr_title=pr_title, pr_number=pr_number)
+    summary = build_summary(
+        findings, pr_title=pr_title, pr_number=pr_number, ai_used=ai_used
+    )
     return summary, findings, files
 
 
-def _collect_findings(files: list[DiffFile], config: Config) -> list[Finding]:
-    """Run static checks and (when an API key is set) the AI reviewer."""
+def _drop_ignored_files(
+    files: list[DiffFile], ignore_paths: list[str]
+) -> list[DiffFile]:
+    """Drop files matching an ignore glob; ignored files are never reviewed."""
+    if not ignore_paths:
+        return files
+    kept = [
+        diff_file
+        for diff_file in files
+        if not any(fnmatch.fnmatch(diff_file.path, pattern) for pattern in ignore_paths)
+    ]
+    dropped = len(files) - len(kept)
+    if dropped:
+        noun = "file" if dropped == 1 else "files"
+        print(
+            f"warning: ignoring {dropped} {noun} matching ignore_paths",
+            file=sys.stderr,
+        )
+    return kept
+
+
+def _limit_diff_size(files: list[DiffFile], max_chars: int) -> list[DiffFile]:
+    """Drop whole trailing hunks/files until the rendered diff fits.
+
+    The limit is applied after parsing, so a file is never cut in the
+    middle of a hunk. If a single hunk alone is larger than the limit it
+    is kept whole (and warned about): dropping it would mean reviewing
+    nothing at all, and chunking already keeps oversized hunks whole.
+    """
+    total = sum(len(diff_file.render_patch()) for diff_file in files)
+    if total <= max_chars:
+        return files
+    dropped_hunks = 0
+    dropped_files = 0
+    while total > max_chars and files:
+        last = files[-1]
+        if not last.hunks:
+            files.pop()
+            dropped_files += 1
+        elif sum(len(f.hunks) for f in files) > 1:
+            last.hunks.pop()
+            dropped_hunks += 1
+            if not last.hunks:
+                files.pop()
+                dropped_files += 1
+        else:
+            break  # one hunk alone exceeds the limit; keep it whole
+        total = sum(len(diff_file.render_patch()) for diff_file in files)
+    parts = []
+    if dropped_files:
+        noun = "file" if dropped_files == 1 else "files"
+        parts.append(f"{dropped_files} {noun}")
+    if dropped_hunks:
+        noun = "hunk" if dropped_hunks == 1 else "hunks"
+        parts.append(f"{dropped_hunks} {noun}")
+    message = (
+        f"warning: diff exceeds max_diff_chars ({max_chars} characters); "
+        f"dropped {' and '.join(parts)}"
+    )
+    if files and total > max_chars:
+        message += "; one remaining hunk alone exceeds the limit, kept whole"
+    print(message, file=sys.stderr)
+    return files
+
+
+def _collect_findings(
+    files: list[DiffFile], config: Config
+) -> tuple[list[Finding], bool]:
+    """Run static checks and (when an API key is set) the AI reviewer.
+
+    Returns the findings and whether the AI reviewer actually ran, so the
+    summary can say which kind of findings these are.
+    """
     findings = _run_static_checks(files)
     api_key = api_key_from_env()
     if api_key is None:
@@ -204,7 +277,7 @@ def _collect_findings(files: list[DiffFile], config: Config) -> list[Finding]:
             "warning: PR_SENTINEL_API_KEY is not set; running static checks only",
             file=sys.stderr,
         )
-        return findings
+        return findings, False
     try:
         from .reviewer import Reviewer, ReviewerError
     except ImportError:
@@ -212,7 +285,13 @@ def _collect_findings(files: list[DiffFile], config: Config) -> list[Finding]:
             "warning: reviewer module is not available; running static checks only",
             file=sys.stderr,
         )
-        return findings
+        return findings, False
+    if config.api_base_url.startswith("http://"):
+        print(
+            "warning: api_base_url uses plain http://; the API key is sent "
+            "in cleartext",
+            file=sys.stderr,
+        )
     try:
         reviewer = Reviewer(
             api_key=api_key, base_url=config.api_base_url, model=config.model
@@ -223,7 +302,8 @@ def _collect_findings(files: list[DiffFile], config: Config) -> list[Finding]:
             f"warning: AI review failed ({exc}); continuing with static checks only",
             file=sys.stderr,
         )
-    return findings
+        return findings, False
+    return findings, True
 
 
 def _run_static_checks(files: list[DiffFile]) -> list[Finding]:
