@@ -3,7 +3,8 @@
 Status as of 2026-11-23, v0.2.3. Two destinations: **PyPI** and the
 **GitHub Marketplace**. Nothing in this document uploads anything — it is
 the checklist for the first publish. The workflow file
-`.github/workflows/publish.yml` is prepared locally and not yet pushed.
+`.github/workflows/publish.yml` lands in this PR
+(`chore/add-publish-workflow`).
 
 ## 0. The name problem — read this first
 
@@ -52,7 +53,7 @@ v0.2.2 carries the blocked name and cannot be listed.
 | Distribution name | **`pr-sentinel-ai`** — renamed in v0.2.2 |
 | Local build | Works — see §2 |
 | `twine check` | PASSED for wheel and sdist |
-| `.github/workflows/publish.yml` | Prepared locally (release trigger, Trusted Publishing); **not pushed** |
+| `.github/workflows/publish.yml` | Added in this PR (release trigger + manual dispatch, Trusted Publishing) |
 | PyPI trusted publisher configured | **Missing** — Jalal, PyPI side (§3) |
 | `pypi` GitHub environment | **Missing** — needs creating (§3) |
 | PyPI account + 2FA | **Missing** — Jalal (§3) |
