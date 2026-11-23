@@ -3,6 +3,7 @@
 import pytest
 
 from pr_sentinel.config import (
+    MAX_INSTRUCTIONS_CHARS,
     Config,
     ConfigError,
     api_key_from_env,
@@ -353,3 +354,68 @@ def test_instructions_file_over_cap_raises(tmp_path):
     config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
     with pytest.raises(ConfigError, match="4000"):
         config.validate()
+
+
+def test_instructions_file_at_cap_loads(tmp_path):
+    # Exactly at the cap is fine, on both the validate() and the
+    # resolve_instructions() path.
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * MAX_INSTRUCTIONS_CHARS, encoding="utf-8")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    config.validate()
+    assert resolve_instructions(config) == "x" * MAX_INSTRUCTIONS_CHARS
+
+
+def test_instructions_file_over_cap_raises_in_resolve(tmp_path):
+    # The resolve path enforces the cap too, not just validate().
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * (MAX_INSTRUCTIONS_CHARS + 1), encoding="utf-8")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="4000"):
+        resolve_instructions(config)
+
+
+def test_instructions_file_read_is_bounded(tmp_path, monkeypatch):
+    # The cap must be enforced by reading at most cap+1 characters:
+    # spy on open() and assert no read of the instructions file ever
+    # asks for more than the cap + 1 characters (and never an
+    # unbounded read), on either the validate() or the resolve path.
+    import builtins
+
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * 100_000, encoding="utf-8")
+    real_open = builtins.open
+    read_sizes: list[int] = []
+
+    class _SpyHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self._handle.read(size)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def _spy_open(file, *args, **kwargs):
+        handle = real_open(file, *args, **kwargs)
+        if str(file) == str(rules):
+            return _SpyHandle(handle)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", _spy_open)
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="4000"):
+        config.validate()
+    assert read_sizes == [MAX_INSTRUCTIONS_CHARS + 1]
+    read_sizes.clear()
+    with pytest.raises(ConfigError, match="4000"):
+        resolve_instructions(config)
+    assert read_sizes == [MAX_INSTRUCTIONS_CHARS + 1]
