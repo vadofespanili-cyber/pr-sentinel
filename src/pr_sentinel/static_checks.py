@@ -20,6 +20,7 @@ False-positive reduction (v0.3.0):
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import re
 
@@ -31,29 +32,51 @@ from .findings import Finding
 # "/* pr-sentinel: ignore */". Case-insensitive. The marker is checked
 # after string literals are stripped (see _StringLiteralStripper), so
 # the same words inside a quoted string — including a multiline
-# triple-quoted string — do not suppress anything.
+# triple-quoted string or a JavaScript template literal — do not
+# suppress anything.
 _IGNORE_MARKER = re.compile(r"(?i)(?:#|//|/\*).*pr-sentinel:\s*ignore")
 
 
+@dataclasses.dataclass
+class _StringFrame:
+    """One open string or interpolation while stripping a line.
+
+    ``kind`` is ``"triple"`` for a triple-quoted string (``delimiter``
+    holds ``\"\"\"`` or ``'''``), ``"template"`` for a backtick
+    template literal, or ``"interp"`` for a ``${...}`` interpolation
+    (``depth`` counts braces nested inside the interpolation itself).
+    """
+
+    kind: str
+    delimiter: str = ""
+    depth: int = 0
+
+
 class _StringLiteralStripper:
-    """Blank out string literals, tracking triple-quoted strings.
+    """Blank out string literals, tracking multiline strings.
 
     Stateful across the added lines of one file: a ``\"\"\"`` or
     ``'''`` that opens on one line and closes on a later line keeps
-    the lines in between blanked, so a ``pr-sentinel: ignore`` inside
-    a multiline string is never mistaken for a comment marker. A
-    quote only starts a string when a matching closing quote exists
+    the lines in between blanked, and so does a JavaScript template
+    literal (backtick) that spans lines, so a ``pr-sentinel: ignore``
+    inside a multiline string is never mistaken for a comment marker.
+    A quote only starts a string when a matching closing quote exists
     later on the line, so an apostrophe in a comment (``# don't ...``)
     does not swallow the marker. A ``#`` outside any string starts a
     comment, so a triple quote inside a comment never opens a string.
-    Only added lines are scanned: a triple-quoted string opened on a
-    context line is not tracked (the checks only ever see added
-    lines).
+    Inside a template literal, ``${...}`` interpolations are real
+    code: their contents are left visible, so a dangerous call inside
+    an interpolation still fires; only the literal text around them
+    is blanked. Frames nest on a stack, so a template literal inside
+    an interpolation works too. Only added lines are scanned: a
+    string opened on a context line is not tracked (the checks only
+    ever see added lines).
     """
 
     def __init__(self) -> None:
-        # The triple-quote delimiter we are currently inside, if any.
-        self._triple: str | None = None
+        # Stack of frames open at the current scan position. The
+        # top frame decides how the next character is treated.
+        self._frames: list[_StringFrame] = []
 
     def strip(self, line: str) -> str:
         chars = list(line)
@@ -63,57 +86,110 @@ class _StringLiteralStripper:
     def _strip(self, chars: list[str]) -> None:
         index = 0
         while index < len(chars):
-            if self._triple is not None:
-                closing = self._find_triple_close(chars, index, self._triple)
-                if closing is None:
-                    # Still inside the string at end of line: the
-                    # whole rest of the line is string content.
-                    for pos in range(index, len(chars)):
-                        chars[pos] = " "
-                    return
-                for pos in range(index, closing + 3):
+            frame = self._frames[-1] if self._frames else None
+            if frame is not None and frame.kind == "triple":
+                index = self._scan_triple(chars, index, frame)
+            elif frame is not None and frame.kind == "template":
+                index = self._scan_template(chars, index)
+            else:
+                index = self._scan_code(chars, index, frame)
+
+    def _scan_code(
+        self, chars: list[str], index: int, frame: _StringFrame | None
+    ) -> int:
+        """Scan one code character; return the next index to scan."""
+        char = chars[index]
+        if char == "#":
+            # The rest of the line is a comment: no string can open
+            # here, and the marker text (if any) stays visible so a
+            # real comment marker still suppresses.
+            return len(chars)
+        if frame is not None:
+            # Inside a ${...} interpolation: braces nest, and the
+            # closing brace returns to the template literal.
+            if char == "{":
+                frame.depth += 1
+                return index + 1
+            if char == "}":
+                if frame.depth == 0:
+                    self._frames.pop()
+                else:
+                    frame.depth -= 1
+                return index + 1
+        if char == "`":
+            # A template literal opens: its text is blanked, while
+            # its interpolations stay visible (see _scan_template).
+            chars[index] = " "
+            self._frames.append(_StringFrame(kind="template"))
+            return index + 1
+        if char not in ("'", '"'):
+            return index + 1
+        triple = char * 3
+        if "".join(chars[index : index + 3]) == triple:
+            closing = self._find_triple_close(chars, index + 3, triple)
+            if closing is None:
+                # Opens here, closes on a later line.
+                for pos in range(index, len(chars)):
                     chars[pos] = " "
-                self._triple = None
-                index = closing + 3
-                continue
-            char = chars[index]
-            if char == "#":
-                # The rest of the line is a comment: no string can
-                # open here, and the marker text (if any) stays
-                # visible so a real comment marker still suppresses.
-                return
-            if char not in ("'", '"'):
-                index += 1
-                continue
-            triple = char * 3
-            if "".join(chars[index : index + 3]) == triple:
-                closing = self._find_triple_close(chars, index + 3, triple)
-                if closing is None:
-                    # Opens here, closes on a later line.
-                    for pos in range(index, len(chars)):
-                        chars[pos] = " "
-                    self._triple = triple
-                    return
-                for pos in range(index, closing + 3):
-                    chars[pos] = " "
-                index = closing + 3
-                continue
-            closing = index + 1
-            while closing < len(chars):
-                if chars[closing] == "\\":
-                    closing += 2
-                    continue
-                if chars[closing] == char:
-                    break
-                closing += 1
-            if closing >= len(chars):
-                # No closing quote on this line: an apostrophe in a
-                # comment, not a string literal.
-                index += 1
-                continue
-            for pos in range(index, closing + 1):
+                self._frames.append(_StringFrame(kind="triple", delimiter=triple))
+                return len(chars)
+            for pos in range(index, closing + 3):
                 chars[pos] = " "
-            index = closing + 1
+            return closing + 3
+        closing = index + 1
+        while closing < len(chars):
+            if chars[closing] == "\\":
+                closing += 2
+                continue
+            if chars[closing] == char:
+                break
+            closing += 1
+        if closing >= len(chars):
+            # No closing quote on this line: an apostrophe in a
+            # comment, not a string literal.
+            return index + 1
+        for pos in range(index, closing + 1):
+            chars[pos] = " "
+        return closing + 1
+
+    def _scan_triple(self, chars: list[str], index: int, frame: _StringFrame) -> int:
+        """Scan inside a triple-quoted string; return the next index."""
+        closing = self._find_triple_close(chars, index, frame.delimiter)
+        if closing is None:
+            # Still inside the string at end of line: the whole rest
+            # of the line is string content.
+            for pos in range(index, len(chars)):
+                chars[pos] = " "
+            return len(chars)
+        for pos in range(index, closing + 3):
+            chars[pos] = " "
+        self._frames.pop()
+        return closing + 3
+
+    def _scan_template(self, chars: list[str], index: int) -> int:
+        """Scan inside a template literal; return the next index."""
+        char = chars[index]
+        if char == "\\":
+            # An escaped character (including an escaped backtick)
+            # cannot close the literal or start an interpolation.
+            chars[index] = " "
+            if index + 1 < len(chars):
+                chars[index + 1] = " "
+            return index + 2
+        if char == "`":
+            chars[index] = " "
+            self._frames.pop()
+            return index + 1
+        if char == "$" and index + 1 < len(chars) and chars[index + 1] == "{":
+            # An interpolation opens: its contents are code, so the
+            # ${ itself is blanked but scanning continues in code
+            # mode until the matching }.
+            chars[index] = " "
+            chars[index + 1] = " "
+            self._frames.append(_StringFrame(kind="interp"))
+            return index + 2
+        chars[index] = " "
+        return index + 1
 
     @staticmethod
     def _find_triple_close(chars: list[str], start: int, delimiter: str) -> int | None:
@@ -359,8 +435,9 @@ def run_static_checks(
     """Run all static checks over the added lines of ``files``."""
     findings: list[Finding] = []
     for diff_file in files:
-        # One stripper per file: a triple-quoted string can span
-        # hunks, so the in-string state carries across them.
+        # One stripper per file: a triple-quoted string or template
+        # literal can span hunks, so the in-string state carries
+        # across them.
         stripper = _StringLiteralStripper()
         for hunk in diff_file.hunks:
             for line in hunk.lines:
@@ -371,8 +448,8 @@ def run_static_checks(
                     # eval() in tests) opts out of static findings on
                     # this exact line only. String literals are stripped
                     # first, so the marker words inside a quoted string
-                    # — including a multiline triple-quoted string —
-                    # do not suppress anything.
+                    # — including a multiline triple-quoted string or
+                    # a template literal — do not suppress anything.
                     continue
                 findings.extend(_check_line(diff_file.path, line.new_no, line.text))
         if diff_file.added_lines > max_added_lines:
