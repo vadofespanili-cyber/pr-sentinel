@@ -110,6 +110,14 @@ All notable changes to pr-sentinel are documented here. The format follows
   from its system/user roles. Note: `instructions` is part of the
   Responses API, but a minimal provider that rejects it can be used
   via `api_format: chat_completions` instead.
+- **Ignore marker inside a JavaScript template literal (bot
+  review).** The string stripper only handled `'`/`"` literals, so
+  a `// pr-sentinel: ignore` inside a backtick template literal
+  wrongly suppressed a finding on that line. Backticks are now
+  tracked like triple-quoted strings (including across lines), while
+  `${...}` interpolations stay visible as code — an `eval()` inside
+  an interpolation still fires, and an escaped backtick does not
+  close the literal early.
 
 ### Changed
 
