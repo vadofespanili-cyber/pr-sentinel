@@ -3,6 +3,64 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Smart false-positive reduction in static checks.** An added line
+  carrying `pr-sentinel: ignore` inside a comment (`#`, `//` or
+  `/* ... */`, case-insensitive) suppresses static findings on that
+  exact line — for intentional fixtures such as `eval()` in tests.
+  Secret matches that are obvious placeholders (`test`/`dummy`/
+  `example`/`fake` values, `changeme`, `your_...`, repeated
+  characters, very short low-entropy values) are filtered by a
+  stdlib-only Shannon entropy helper, while real high-entropy secrets
+  (genuine AWS keys, private key headers, realistic `sk-proj-...` /
+  `ghp_...` tokens) are still reported — with regression tests pinning
+  both sides.
+- **Chat Completions provider support (`api_format`).** New config
+  setting `api_format` (`responses` by default, `chat_completions`
+  for OpenRouter, Ollama, Groq, vLLM and any OpenAI-compatible
+  provider), plus a `--api-format` flag on `review` / `review-diff`
+  and an `api_format` Action input. Retry/backoff, timeout, JSON
+  parsing and prompt-injection delimiters are identical for both
+  formats; an invalid value is a config error.
+- **Custom repo instructions.** New `instructions` (inline) and
+  `instructions_file` (path) config settings (max 4,000 chars; the
+  file wins over the inline string; a missing/unreadable file or an
+  over-cap value is a config error). Instructions are injected into
+  the reviewer prompt as repository guidelines, clearly separated
+  from the untrusted diff delimiters.
+- **Risk-prioritized diff ordering.** Before `max_diff_chars` /
+  `max_files` truncation, files are sorted by risk tier (CI/CD and
+  auth/security/crypto first, core source next, tests next, docs and
+  lockfiles last; stable within a tier), so the most security-relevant
+  files survive a cut. Hunk headers now keep their enclosing
+  function/class context when rendered for the model.
+- **Clean inline comment lifecycle.** Inline comments carry a hidden
+  `<!-- pr-sentinel:inline -->` marker: re-pushes no longer duplicate
+  an identical comment from the bot, and threads the bot opened for
+  findings that are now fixed are resolved automatically via GraphQL
+  (`resolveReviewThread`). Both are best effort — a failed listing or
+  GraphQL call warns on stderr and the review still succeeds.
+  `--dry-run` never lists, posts or resolves anything.
+
+### Fixed
+
+- **`Cargo.lock` was not recognized as a lockfile** in risk
+  ordering: the lockfile set compared a lowercased basename against
+  a mixed-case entry, so `Cargo.lock` landed in the core-source tier
+  instead of the lowest tier.
+
+### Changed
+
+- README documents `api_format` (with OpenRouter/Ollama examples),
+  `instructions` / `instructions_file`, `pr-sentinel: ignore`, and
+  the inline-comment lifecycle; the Limitations section now states
+  the placeholder-filtering and GraphQL trade-offs honestly.
+- The example config (`examples/pr-sentinel.example.yaml`) shows the
+  new settings (commented where optional).
+
 ## [0.2.4] - 2026-11-23
 
 ### Added
