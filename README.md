@@ -211,6 +211,20 @@ a missing or unreadable file, or instructions over the cap, is a config
 error (exit `2`). Without either setting the prompt is byte-identical
 to previous versions.
 
+Guidelines are placed in the user message as lower-priority style and
+focus preferences — never in the system prompt — and the system prompt
+states explicitly that they can never override the core security
+rules, the JSON output schema, or instruct the reviewer to suppress or
+ignore findings. That matters because a PR author can change the repo
+config inside their own PR: **repos that review untrusted external PRs
+should load the config from the base branch or pass a trusted
+`--config` path**, rather than reading `.pr-sentinel.yaml` from the PR
+branch.
+
+`instructions_file` must be a relative path inside the config file's
+directory: absolute paths and `..` escapes are rejected as config
+errors.
+
 ### Suppressing a static finding
 
 An added line carrying `pr-sentinel: ignore` inside a comment
@@ -228,7 +242,12 @@ repeated characters, very short low-entropy values), while real
 high-entropy secrets — genuine AWS keys, private key headers,
 realistic `sk-proj-...` / `ghp_...` tokens — are still reported. The
 marker must be inside a comment: the same words in a string literal do
-not suppress anything.
+not suppress anything. Placeholder matching is exact: a value is a
+placeholder when a component of it is a placeholder word
+(`ghp_test`), a placeholder word repeated or followed by digits
+(`test123`), or a well-known published example value — real words that
+merely end in a placeholder word (`contest`, `protest`, `latest`) are
+still reported.
 
 ## CI gate and SARIF output
 
@@ -331,8 +350,10 @@ code.` with a suggested fix.
    reviewed through the Responses API by default, or the Chat
    Completions API when `api_format: chat_completions` is set. Hunk
    headers keep their enclosing function/class names, and repo
-   instructions (if configured) are injected as guidelines clearly
-   separated from the untrusted diff. The model must return a JSON array
+   instructions (if configured) are injected in the user message as
+   lower-priority guidelines, clearly separated from the untrusted
+   diff, with a system-prompt guardrail that they can never override
+   the core rules. The model must return a JSON array
    of findings; anything unparseable is rejected.
 5. **Filter and report** — findings below the severity threshold or in
    ignored paths are dropped, then a Markdown summary and inline comments
@@ -357,8 +378,9 @@ design decisions.
   placeholder secrets are filtered and `pr-sentinel: ignore` suppresses
   a line, but a real-looking value the heuristics cannot tell apart from
   a fixture can still be flagged — and, conversely, a genuinely leaked
-  secret that happens to look like a placeholder (for example a key
-  ending in "test") would be missed. A full AST-based analysis was
+  secret that happens to look like a placeholder (for example a value
+  that is exactly a placeholder word, or `ghp_test`-shaped) would be
+  missed. A full AST-based analysis was
   deliberately not added: the reviewer only sees the diff, not full file
   contents, so AST on partial content would still miss cases.
 - **Inline thread resolution is best effort.** Resolving fixed threads
