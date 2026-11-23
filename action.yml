@@ -27,6 +27,10 @@ inputs:
     description: "Fail the run (exit 1) if any reported finding meets this severity: none, critical, high, medium, low"
     required: false
     default: ""
+  api_format:
+    description: "Model API format: responses (default) or chat_completions (OpenRouter, Ollama, Groq, vLLM and other OpenAI-compatible providers)"
+    required: false
+    default: ""
   sarif_out:
     description: "Write findings as SARIF 2.1.0 to this path (relative to the workspace, e.g. pr-sentinel.sarif)"
     required: false
