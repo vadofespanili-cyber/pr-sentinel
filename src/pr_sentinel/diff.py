@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass, field
 
-_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 
 # GitHub review comments address a line by its 1-based position inside the
 # file's patch, where hunk headers count as lines and counting starts at the
@@ -30,10 +31,14 @@ class Hunk:
     new_start: int
     new_count: int
     lines: list[DiffLine] = field(default_factory=list)
+    # The section heading after the second "@@" (e.g. " def foo():"),
+    # when the diff carries one. It is preserved on render so the model
+    # sees the enclosing function/class name; "" when absent.
+    section: str = ""
 
     def render(self) -> str:
         header = f"@@ -{self.old_start},{self.old_count} "
-        header += f"+{self.new_start},{self.new_count} @@\n"
+        header += f"+{self.new_start},{self.new_count} @@{self.section}\n"
         body = "".join(
             ("+" if line.kind == "add" else "-" if line.kind == "del" else " ")
             + line.text
@@ -138,7 +143,12 @@ def parse_diff(text: str) -> list[DiffFile]:
             old_count = int(match.group(2) or "1")
             new_start = int(match.group(3))
             new_count = int(match.group(4) or "1")
-            hunk = Hunk(old_start, old_count, new_start, new_count)
+            # A section of only whitespace is no section at all: keep
+            # the render byte-identical to v0.2.x for plain headers.
+            section = match.group(5)
+            if not section.strip():
+                section = ""
+            hunk = Hunk(old_start, old_count, new_start, new_count, section=section)
             current.hunks.append(hunk)
             old_no, new_no = old_start, new_start
             position += 1  # the "@@" header counts as a patch line
@@ -176,6 +186,82 @@ def parse_diff(text: str) -> list[DiffFile]:
 def render_patch(files: list[DiffFile]) -> str:
     """Render the full patch text for the given files."""
     return "".join(f.render_patch() for f in files)
+
+
+# --- Risk-prioritized file ordering ---------------------------------------
+# Before truncation, files are sorted by risk tier so the most
+# security-relevant files survive max_diff_chars / max_files cuts.
+# The sort is stable: files within one tier keep their original order.
+
+# Compared against the lowercased basename, so every entry is lowercase.
+_LOCKFILE_NAMES = {
+    "package-lock.json",
+    "poetry.lock",
+    "yarn.lock",
+    "cargo.lock",
+    "pnpm-lock.yaml",
+}
+_MINIFIED_SUFFIXES = (".min.js", ".min.css", ".map")
+
+
+def _segment_matches(segment: str, word: str) -> bool:
+    """True when a path segment is ``word`` or starts with ``word``
+    followed by ``_``, ``-`` or ``.`` (``auth``, ``auth_service``,
+    ``security.py`` — but not ``author``)."""
+    lowered = segment.lower()
+    return lowered == word or lowered.startswith((word + "_", word + "-", word + "."))
+
+
+def risk_tier(path: str) -> int:
+    """Risk tier of a file path: 1 (highest) to 4 (lowest).
+
+    Tier 1 — CI/CD & infra (``.github/workflows/**``, ``Dockerfile*``,
+    ``action.yml``, ``entrypoint.sh``) and auth/security/crypto paths.
+    Tier 3 — tests (``tests/**``, ``test/**``, ``*_test.*``,
+    ``*.test.*``, ``*.spec.*``, ``test_*.*``).
+    Tier 4 — docs/markdown, lockfiles and minified/generated assets.
+    Tier 2 — everything else (core source code), the default.
+    """
+    normalized = path.replace("\\", "/")
+    segments = [segment for segment in normalized.split("/") if segment]
+    basename = segments[-1] if segments else ""
+    lower_base = basename.lower()
+    if normalized.startswith(".github/workflows/"):
+        return 1
+    if lower_base == "dockerfile" or lower_base.startswith("dockerfile."):
+        return 1
+    if lower_base in ("action.yml", "action.yaml", "entrypoint.sh"):
+        return 1
+    if any(
+        _segment_matches(segment, word)
+        for segment in segments
+        for word in ("auth", "security", "crypto")
+    ):
+        return 1
+    if lower_base in _LOCKFILE_NAMES:
+        return 4
+    if lower_base.endswith((".md", ".rst")):
+        return 4
+    if segments and segments[0].lower() in ("docs", "doc"):
+        return 4
+    if lower_base.endswith(_MINIFIED_SUFFIXES):
+        return 4
+    if segments and segments[0].lower() in ("tests", "test"):
+        return 3
+    if (
+        fnmatch.fnmatch(lower_base, "*_test.*")
+        or fnmatch.fnmatch(lower_base, "*.test.*")
+        or fnmatch.fnmatch(lower_base, "*.spec.*")
+        or fnmatch.fnmatch(lower_base, "test_*.*")
+    ):
+        return 3
+    return 2
+
+
+def sort_by_risk(files: list[DiffFile]) -> list[DiffFile]:
+    """Sort files by risk tier (1 first), stably: files within one tier
+    keep their original relative order."""
+    return sorted(files, key=lambda diff_file: risk_tier(diff_file.path))
 
 
 def chunk_diff(files: list[DiffFile], max_chars: int = 30000) -> list[DiffChunk]:
