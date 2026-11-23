@@ -84,6 +84,16 @@ All notable changes to pr-sentinel are documented here. The format follows
   Providers that return `message.content` as a list of content blocks
   (`[{"type": "text", "text": "..."}]`) now have their text blocks
   joined instead of the reply being dropped as "no output text".
+- **`instructions_file` is read bounded (bot review).** The file was
+  read completely before its 4,000-character cap was checked; it is
+  now read at most cap+1 characters in both `validate()` and
+  `resolve_instructions()`, so a very large file is rejected without
+  ever loading it fully.
+- **Ignore marker inside a multiline string (bot review).** String
+  stripping is now stateful across the added lines of a file: a
+  `pr-sentinel: ignore` inside a triple-quoted string no longer
+  suppresses a finding on the line where the string closes. A real
+  comment marker after the string closes still suppresses.
 
 ### Changed
 
