@@ -217,7 +217,7 @@ class GitHubClient:
             "  pullRequest(number: $number) {"
             "   reviewThreads(first: 100) {"
             "    nodes { id isResolved path line"
-            "     comments(first: 10) { nodes { body author { login } } }"
+            "     comments(first: 10) { nodes { body author { __typename login } } }"
             "    }"
             "   }"
             "  }"
