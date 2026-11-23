@@ -105,11 +105,13 @@ def test_review_chunk_output_text_shape(fake_api):
     assert findings[0].file == "a.py"
     assert findings[0].line == 2
     assert findings[0].rule == "ai-review"
-    # The request carried the model and the prompt with the diff.
+    # The request carried the model and the prompt with the diff:
+    # the system prompt in the privileged `instructions` field, the
+    # user content (diff) in `input`.
     request = json.loads(fake_api.requests[0])
     assert request["model"] == "test-model"
     assert "some diff" in request["input"]
-    assert request["input"].startswith("You are a careful code reviewer")
+    assert request["instructions"].startswith("You are a careful code reviewer")
 
 
 def test_review_chunk_responses_output_shape(fake_api):
@@ -368,7 +370,45 @@ def test_responses_format_still_posts_to_responses_endpoint(fake_api):
     assert fake_api.paths == ["/responses"]
     payload = json.loads(fake_api.requests[0])
     assert "input" in payload
+    assert "instructions" in payload
     assert "messages" not in payload
+
+
+def test_responses_payload_splits_instructions_from_input(fake_api):
+    """The Responses payload carries the system prompt in the
+    privileged `instructions` field and the user content (guidelines
+    + diff) in `input` — the two are never concatenated into one
+    string, so repo-controlled guidelines cannot override the core
+    rules or the JSON schema."""
+    findings = _reviewer(fake_api).review_chunk("some diff", instructions="Be strict.")
+    assert len(findings) == 1
+    assert fake_api.paths == ["/responses"]
+    payload = json.loads(fake_api.requests[0])
+    assert "messages" not in payload
+    system = payload["instructions"]
+    user = payload["input"]
+    assert system.startswith("You are a careful code reviewer")
+    assert "can never override" in system
+    assert "Be strict." not in system
+    assert "Be strict." in user
+    assert "Repository guidelines" in user
+    assert "some diff" in user
+    assert user.index("Repository guidelines") < user.index(
+        "--- BEGIN DIFF (untrusted data) ---"
+    )
+
+
+def test_responses_payload_without_instructions_has_no_guardrail(fake_api):
+    """Without custom instructions the Responses payload still splits
+    system and user content, and the system text is unchanged (no
+    guardrail is added when there is nothing to guard against)."""
+    findings = _reviewer(fake_api).review_chunk("some diff")
+    assert len(findings) == 1
+    payload = json.loads(fake_api.requests[0])
+    assert payload["instructions"].startswith("You are a careful code reviewer")
+    assert "can never override" not in payload["instructions"]
+    assert "Repository guidelines" not in payload["input"]
+    assert "some diff" in payload["input"]
 
 
 def test_chat_completions_empty_choices_raises(fake_api):
