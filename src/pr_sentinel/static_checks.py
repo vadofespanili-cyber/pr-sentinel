@@ -3,14 +3,121 @@
 Only added lines are inspected: removed lines and context lines never
 produce findings. Secret values are never echoed in messages, so findings
 are safe to log and post as review comments.
+
+False-positive reduction (v0.3.0):
+
+- An added line carrying ``pr-sentinel: ignore`` inside a comment
+  (``#``, ``//`` or ``/* ... */`` style, case-insensitive) suppresses
+  static findings on that exact line — for intentional fixtures such
+  as ``eval()`` in tests.
+- Secret matches that are obvious placeholders (dummy/test/example
+  values, repeated characters, or very short low-entropy values) are
+  suppressed. Real high-entropy secrets are never suppressed: the
+  private-key rule is exempt outright, and the entropy gate only fires
+  for short values, so genuine AWS keys, project keys and tokens still
+  report.
 """
 
 from __future__ import annotations
 
+import math
 import re
 
 from .diff import DiffFile
 from .findings import Finding
+
+# An inline suppression marker, inside a comment on the same added line:
+# "# pr-sentinel: ignore", "// pr-sentinel: ignore" or
+# "/* pr-sentinel: ignore */". Case-insensitive. The marker must follow
+# a comment opener so a string literal containing the words does not
+# suppress anything by accident.
+_IGNORE_MARKER = re.compile(r"(?i)(?:#|//|/\*).*pr-sentinel:\s*ignore")
+
+# Words that mark a matched secret value as an obvious placeholder —
+# but only as a whole component of the value (split on non-alphanumeric
+# characters) or as its suffix: "ghp_test" is a fixture, while
+# "sk-fake1234567890abcdefghij" is a realistic key that must still
+# fire, so a mere substring is not enough.
+_PLACEHOLDER_WORDS = (
+    "test",
+    "dummy",
+    "example",
+    "fake",
+    "sample",
+    "placeholder",
+    "changeme",
+)
+# "your_..." values ("your_api_key_here") are placeholders too.
+_PLACEHOLDER_SUBSTRING = "your_"
+
+# A secret value shorter than this AND below the entropy threshold is a
+# dummy, not a leak. The threshold is deliberately low (2.0 bits/char):
+# weak-looking but real values the tests pin down ("hunter2" at 2.81,
+# "abcdef" at 2.59) still fire, while degenerate values ("aabbcc" at
+# 1.58, "xxxx" at 0.0) do not. Long values never reach this gate: real
+# tokens are long and high-entropy.
+_PLACEHOLDER_MAX_LEN = 12
+_PLACEHOLDER_MAX_ENTROPY = 2.0
+
+# The value inside the quotes of a hardcoded-credential match.
+_QUOTED_VALUE = re.compile(r"""['"]([^'"]+)['"]""")
+# Split a secret value into components ("ghp_test" -> ["ghp", "test"]).
+_COMPONENTS = re.compile(r"[^a-z0-9]+")
+
+
+def shannon_entropy(value: str) -> float:
+    """Shannon entropy of ``value`` in bits per character (stdlib only)."""
+    if not value:
+        return 0.0
+    counts: dict[str, int] = {}
+    for char in value:
+        counts[char] = counts.get(char, 0) + 1
+    length = len(value)
+    return -sum(
+        (count / length) * math.log2(count / length) for count in counts.values()
+    )
+
+
+def _looks_like_placeholder(token: str) -> bool:
+    """True for obvious dummy secret values; never True for real secrets.
+
+    A value is a placeholder when a component of it is a placeholder
+    word (``ghp_test``), it ends with one (the AWS example key
+    ``AKIAIOSFODNN7EXAMPLE``), it contains ``your_``, or it is both
+    short and very low-entropy (``xxxx`` has entropy 0.0). A
+    random-looking token of real length is never caught: its entropy is
+    far above the threshold and its length is above the cap.
+    """
+    lowered = token.lower()
+    if _PLACEHOLDER_SUBSTRING in lowered:
+        return True
+    for part in _COMPONENTS.split(lowered):
+        if not part:
+            continue
+        if part in _PLACEHOLDER_WORDS:
+            return True
+        if any(part.endswith(word) for word in _PLACEHOLDER_WORDS):
+            return True
+    return len(token) < _PLACEHOLDER_MAX_LEN and (
+        shannon_entropy(token) < _PLACEHOLDER_MAX_ENTROPY
+    )
+
+
+def _is_placeholder_match(rule: str, matched: str) -> bool:
+    """True when a secret-pattern match is a dummy value, not a leak.
+
+    For the generic hardcoded-credential pattern the value inside the
+    quotes is tested (``password = "test123"`` is a fixture; the key
+    name is not the secret). For specific token patterns the whole
+    match is the token.
+    """
+    if rule == "hardcoded-credential":
+        value_match = _QUOTED_VALUE.search(matched)
+        if value_match is None:
+            return False
+        return _looks_like_placeholder(value_match.group(1))
+    return _looks_like_placeholder(matched)
+
 
 # (pattern, rule, message, suggestion)
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], str, str, str]] = [
@@ -148,6 +255,11 @@ def run_static_checks(
             for line in hunk.lines:
                 if line.kind != "add":
                     continue
+                if _IGNORE_MARKER.search(line.text):
+                    # Inline suppression: an intentional fixture (e.g.
+                    # eval() in tests) opts out of static findings on
+                    # this exact line only.
+                    continue
                 findings.extend(_check_line(diff_file.path, line.new_no, line.text))
         if diff_file.added_lines > max_added_lines:
             first_added = next(
@@ -181,23 +293,32 @@ def _check_line(path: str, line_no: int | None, text: str) -> list[Finding]:
     findings: list[Finding] = []
     specific_secret_found = False
     for pattern, rule, message, suggestion in _SECRET_PATTERNS:
-        if pattern.search(text):
-            findings.append(
-                Finding(
-                    severity="critical",
-                    category="security",
-                    file=path,
-                    line=line_no,
-                    message=message,
-                    suggestion=suggestion,
-                    rule=rule,
-                )
+        match = pattern.search(text)
+        if match is None:
+            continue
+        if rule == "leaked-private-key":
+            # Private key headers are always real: the dashes alone
+            # would trip the repeated-character placeholder check, so
+            # this rule is exempt from placeholder filtering outright.
+            pass
+        elif _is_placeholder_match(rule, match.group(0)):
+            continue
+        findings.append(
+            Finding(
+                severity="critical",
+                category="security",
+                file=path,
+                line=line_no,
+                message=message,
+                suggestion=suggestion,
+                rule=rule,
             )
-            # The generic hardcoded-credential pattern is a fallback: it
-            # must not double-report a line a specific secret rule already
-            # caught (e.g. api_key = "sk-...").
-            if rule != "hardcoded-credential":
-                specific_secret_found = True
+        )
+        # The generic hardcoded-credential pattern is a fallback: it
+        # must not double-report a line a specific secret rule already
+        # caught (e.g. api_key = "sk-...").
+        if rule != "hardcoded-credential":
+            specific_secret_found = True
     if specific_secret_found:
         findings = [f for f in findings if f.rule != "hardcoded-credential"]
     for pattern, severity, category, rule, message, suggestion in _DANGEROUS_PATTERNS:
