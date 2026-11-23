@@ -253,6 +253,59 @@ def test_ignore_marker_survives_apostrophe_in_comment():
     assert findings == []
 
 
+def test_ignore_marker_inside_multiline_string_does_not_suppress():
+    # A marker inside a triple-quoted string is string content, not a
+    # comment: the string closes on the same line before "; eval(u)",
+    # and the eval() is still caught. (The markers on the source lines
+    # are Python comments outside the fixture strings, so the checked
+    # diff text is unchanged; they keep our own review of this PR
+    # from flagging the fixtures themselves.)
+    lines = [
+        's = """',
+        '# pr-sentinel: ignore"""; eval(u)',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 3
+
+
+def test_ignore_marker_on_middle_line_of_multiline_string():
+    # The marker on a middle line of a triple-quoted string must not
+    # suppress anything: the eval() after the string closes fires.
+    lines = [
+        's = """',
+        "# pr-sentinel: ignore",
+        '"""; eval(u)',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 4
+
+
+def test_ignore_marker_after_closed_multiline_string_suppresses():
+    # Once the triple-quoted string has closed, a real comment marker
+    # on the same line still suppresses the finding.
+    lines = [
+        's = """',
+        'doc"""; eval(u)  # pr-sentinel: ignore',
+    ]
+    findings = _check(lines)
+    assert findings == []
+
+
+def test_ignore_marker_inside_single_quote_multiline_string():
+    # The same multiline behaviour with ''' delimiters.
+    lines = [
+        "s = '''",
+        "# pr-sentinel: ignore'''; eval(u)",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
 def test_real_words_ending_in_placeholder_are_not_suppressed():
     # "contest" / "protest" / "latest" end in "test" but are real words,
     # not fixtures — they must still fire. (The markers on the source
