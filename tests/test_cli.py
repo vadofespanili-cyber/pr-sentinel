@@ -1797,6 +1797,38 @@ def test_post_review_only_inspects_thread_root_comment():
     assert client.resolved == []
 
 
+def test_post_review_resolves_null_line_thread_when_file_has_no_findings():
+    """A bot thread with a null line (outdated diff position) is
+    resolved when its file has no current findings at any line."""
+    client = _StubClient()
+    client.threads = [_own_thread(line=None)]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
+    assert client.resolved == ["T1"]
+
+
+def test_post_review_keeps_null_line_thread_when_file_still_has_finding():
+    """A null-line thread is NOT resolved while its file still has a
+    current finding — the finding may have moved to another line."""
+    client = _StubClient()
+    client.threads = [_own_thread(line=None)]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert client.resolved == []
+
+
+def test_post_review_keeps_null_line_thread_of_another_user():
+    """A null-line thread without our marker is never resolved, even
+    when its file has no current findings."""
+    client = _StubClient()
+    thread = _own_thread(line=None)
+    thread["comments"]["nodes"][0]["body"] = "A human comment."
+    client.threads = [thread]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
+    assert client.resolved == []
+
+
 def test_post_review_dedupes_before_max_inline_comments():
     """Dedup runs before the max_inline_comments cut: a previously
     posted finding must not crowd out a new finding on re-pushes."""
