@@ -7,6 +7,10 @@
 
 AI-powered pull request review bot — as a GitHub Action and a CLI.
 
+Names: repository and CLI command `pr-sentinel`; PyPI package
+[`pr-sentinel-ai`](https://pypi.org/project/pr-sentinel-ai/); GitHub
+Marketplace action `ai-pr-sentinel`.
+
 pr-sentinel reviews a pull request's diff with an AI model (via a
 Responses-compatible API) and deterministic static checks. It finds bugs,
 security issues and performance problems, posts a summary comment, adds
@@ -76,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.3
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.4
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
 ```
@@ -181,7 +185,7 @@ findings that were reported, so with the default threshold `medium` a
 show up in GitHub code scanning. Upload it in a later step:
 
 ```yaml
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.3
+      - uses: vadofespanili-cyber/pr-sentinel@v0.2.4
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
           sarif_out: pr-sentinel.sarif
@@ -281,16 +285,15 @@ design decisions.
   retried up to 3 attempts with exponential backoff, honoring a
   Retry-After header; a persistent failure falls back to static checks
   only, with a warning.
-- **English prompts.** Review prompts and messages are in English in
-  v0.1.0.
+- **English prompts.** Review prompts and messages are in English.
 
 ## Releases
 
 Versioned releases live on the
 [Releases page](https://github.com/vadofespanili-cyber/pr-sentinel/releases).
-The current release is **v0.2.3** — see the
+The current release is **v0.2.4** — see the
 [Changelog](CHANGELOG.md) and the
-[release notes](docs/release-notes-v0.2.3.md) for what it includes.
+[release notes](docs/release-notes-v0.2.4.md) for what it includes.
 v0.1.2 was driven by an independent external review (Google Gemini 4
 Neon); the full review is in
 [docs/reviews/gemini-2026-11-22.md](docs/reviews/gemini-2026-11-22.md).
