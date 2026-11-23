@@ -54,9 +54,9 @@ v0.2.2 carries the blocked name and cannot be listed.
 | Local build | Works — see §2 |
 | `twine check` | PASSED for wheel and sdist |
 | `.github/workflows/publish.yml` | Added in this PR (release trigger + manual dispatch, Trusted Publishing) |
-| PyPI trusted publisher configured | **Missing** — Jalal, PyPI side (§3) |
-| `pypi` GitHub environment | **Missing** — needs creating (§3) |
-| PyPI account + 2FA | **Missing** — Jalal (§3) |
+| PyPI trusted publisher configured | **Done 2026-11-23** — pending publisher for `pr-sentinel-ai` (repo `vadofespanili-cyber/pr-sentinel`, workflow `publish.yml`, environment `pypi`) (§3) |
+| `pypi` GitHub environment | **Done 2026-11-23** — created with `vadofespanili-cyber` as required reviewer (§3) |
+| PyPI account + 2FA | **Done 2026-11-23** — account `bigjalal`, email verified, TOTP 2FA enabled (§3) |
 
 ## 2. Local build (verified 2026-11-23, NOT uploaded)
 
@@ -197,15 +197,16 @@ After the rename has been released (a tagged release carrying the new
   Marketplace action `ai-pr-sentinel` (after `pr-sentinel-ai` was
   rejected at publish time — an organization of that name exists).
   The `pr-sentinel` console command stays as it is.
-- [ ] PyPI account + verified email + 2FA enabled.
-- [ ] Add the PyPI Trusted Publisher (pending publisher) for
-  `pr-sentinel-ai` — needs his PyPI login; Muse can walk him through it.
-- [ ] Create the `pypi` GitHub environment (or approve Muse doing it
-  via the browser).
+- [x] PyPI account (`bigjalal`) + verified email + 2FA enabled (2026-11-23).
+- [x] PyPI Trusted Publisher (pending publisher) for
+  `pr-sentinel-ai` registered 2026-11-23.
+- [x] `pypi` GitHub environment created 2026-11-23 with
+  `vadofespanili-cyber` as required reviewer.
 - [x] GitHub 2FA enabled 2026-11-23 (authenticator app) + Marketplace
   Developer Agreement accepted.
-- [ ] (Marketplace) Check the "Publish this Action" box on the v0.2.3
-  release (browser, ~2 min) — or let Muse do it via the browser.
+- [x] (Marketplace) "Publish this Action" box checked on the v0.2.3
+  release — listing live at
+  <https://github.com/marketplace/actions/ai-pr-sentinel>.
 
 ## Sources
 
