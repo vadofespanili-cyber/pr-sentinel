@@ -90,9 +90,17 @@ provider. The action posts one summary comment and line-level comments on
 the pull request. It never merges, closes or changes code — it only
 comments. The summary comment is updated in place when new commits are
 pushed (it carries a hidden marker), so re-pushes do not spam the PR
-with a new summary each time.
+with a new summary each time. Inline comments are deduplicated the same
+way, and threads the bot opened for findings that are now fixed are
+resolved automatically (best effort — if GitHub GraphQL is unavailable
+the review still succeeds with a warning).
 
 A full example is in [examples/github-workflow.yml](examples/github-workflow.yml).
+
+To use a Chat Completions provider instead (OpenRouter, Ollama, Groq,
+vLLM or any OpenAI-compatible endpoint), set `api_format:
+chat_completions` and point `api_base_url` at that provider — see
+[Other model providers](#other-model-providers-api_format) below.
 
 ## Quick start — CLI
 
@@ -138,6 +146,9 @@ max_diff_chars: 100000       # truncate larger diffs with a warning
 mode: inline                 # inline = summary + line comments, summary = summary only
 max_inline_comments: 20      # cap on line-level comments
 api_base_url: https://api.openai.com/v1
+api_format: responses        # responses (default) or chat_completions — see below
+instructions: "Focus on security; ignore style nits."  # optional repo-specific guidelines for the reviewer
+instructions_file: .pr-sentinel-instructions.md  # optional file with the same guidelines (max 4,000 chars; wins over `instructions`)
 ```
 
 | Setting | Default |
@@ -151,6 +162,9 @@ api_base_url: https://api.openai.com/v1
 | `mode` | `inline` |
 | `max_inline_comments` | `20` |
 | `api_base_url` | `https://api.openai.com/v1` |
+| `api_format` | `responses` |
+| `instructions` | `None` |
+| `instructions_file` | `None` |
 
 Environment variables:
 
@@ -158,6 +172,63 @@ Environment variables:
 | --- | --- |
 | `PR_SENTINEL_API_KEY` | API key for the model provider (required for AI review; without it only static checks run) |
 | `GITHUB_TOKEN` | GitHub token with pull-request read/write access (required for `review`) |
+
+### Other model providers (`api_format`)
+
+By default pr-sentinel talks to the Responses API (`POST
+{api_base_url}/responses`). Set `api_format: chat_completions` (or
+`--api-format chat_completions` on `review` / `review-diff`, or the
+`api_format` Action input) to use the Chat Completions API instead
+(`POST {api_base_url}/chat/completions` with a standard `messages`
+array). The retry/backoff, timeout, JSON parsing and prompt-injection
+delimiters are identical for both formats, so any OpenAI-compatible
+provider works with no new dependencies:
+
+```yaml
+# OpenRouter
+api_base_url: https://openrouter.ai/api/v1
+api_format: chat_completions
+model: openai/gpt-4o-mini
+
+# Ollama (local, no key needed for the model itself — set any non-empty
+# PR_SENTINEL_API_KEY so the CLI enables AI review)
+# api_base_url: http://localhost:11434/v1
+# api_format: chat_completions
+# model: llama3.1
+```
+
+An invalid `api_format` is a config error (exit `2`).
+
+### Repo-specific instructions
+
+`instructions` (inline string) or `instructions_file` (path to a
+Markdown/text file) adds repository guidelines to the reviewer prompt,
+clearly separated from the untrusted diff delimiters — for example
+"this repo uses tabs", "ignore performance nits in tests", or "pay
+extra attention to the payment code". The file wins over the inline
+string when both are set. The total size is capped at 4,000 characters;
+a missing or unreadable file, or instructions over the cap, is a config
+error (exit `2`). Without either setting the prompt is byte-identical
+to previous versions.
+
+### Suppressing a static finding
+
+An added line carrying `pr-sentinel: ignore` inside a comment
+(`#`, `//` or `/* ... */`, case-insensitive) suppresses static-check
+findings on that exact line only — for intentional fixtures such as
+`eval()` in tests or a dummy token in an example:
+
+```python
+x = eval(user_input)  # pr-sentinel: ignore
+```
+
+Static checks also filter obvious placeholder secrets on their own
+(`test`/`dummy`/`example`/`fake` values, `changeme`, `your_...`,
+repeated characters, very short low-entropy values), while real
+high-entropy secrets — genuine AWS keys, private key headers,
+realistic `sk-proj-...` / `ghp_...` tokens — are still reported. The
+marker must be inside a comment: the same words in a string literal do
+not suppress anything.
 
 ## CI gate and SARIF output
 
@@ -251,13 +322,23 @@ code.` with a suggested fix.
    lines; each added line is mapped to its GitHub diff position so inline
    comments land on the right line.
 3. **Static checks** — deterministic, no-AI checks over added lines only:
-   leaked secrets, dangerous calls, oversized files.
-4. **AI review** — the diff is split into chunks that fit the model's
-   context and each chunk is reviewed through the Responses API. The model
-   must return a JSON array of findings; anything unparseable is rejected.
+   leaked secrets, dangerous calls, oversized files. Obvious placeholder
+   values are filtered out, and an added line can opt out with a
+   `pr-sentinel: ignore` comment (see above).
+4. **AI review** — files are sorted by risk before any truncation (CI/CD
+   and auth/security files first, docs and lockfiles last), then the diff
+   is split into chunks that fit the model's context. Each chunk is
+   reviewed through the Responses API by default, or the Chat
+   Completions API when `api_format: chat_completions` is set. Hunk
+   headers keep their enclosing function/class names, and repo
+   instructions (if configured) are injected as guidelines clearly
+   separated from the untrusted diff. The model must return a JSON array
+   of findings; anything unparseable is rejected.
 5. **Filter and report** — findings below the severity threshold or in
    ignored paths are dropped, then a Markdown summary and inline comments
-   are posted (or printed in `--dry-run` / `review-diff` mode).
+   are posted (or printed in `--dry-run` / `review-diff` mode). Inline
+   comments carry a hidden marker so re-pushes never duplicate them, and
+   the bot's own threads for fixed findings are resolved automatically.
 
 See [docs/architecture.md](docs/architecture.md) for the module map and
 design decisions.
@@ -272,11 +353,19 @@ design decisions.
   it cannot reliably reason about cross-file architecture or whole-repo
   invariants.
 - **Static checks are single-line regexes.** Multi-line patterns (for
-  example `yaml.load(` split across lines) are not detected, and the
-  generic credential pattern can fire on harmless test values. A full
-  AST-based analysis was deliberately not added: the reviewer only sees
-  the diff, not full file contents, so AST on partial content would
-  still miss cases.
+  example `yaml.load(` split across lines) are not detected. Obvious
+  placeholder secrets are filtered and `pr-sentinel: ignore` suppresses
+  a line, but a real-looking value the heuristics cannot tell apart from
+  a fixture can still be flagged — and, conversely, a genuinely leaked
+  secret that happens to look like a placeholder (for example a key
+  ending in "test") would be missed. A full AST-based analysis was
+  deliberately not added: the reviewer only sees the diff, not full file
+  contents, so AST on partial content would still miss cases.
+- **Inline thread resolution is best effort.** Resolving fixed threads
+  uses GitHub GraphQL (`resolveReviewThread`); if GraphQL fails or the
+  token lacks permission, the threads are left open and the review still
+  succeeds with a warning. Only the first 100 review threads are
+  considered.
 - **Model-dependent.** Review quality depends on the model and on the diff
   fitting into context; very large PRs are limited at `max_diff_chars`:
   whole trailing files/hunks are dropped (never cut mid-hunk), with a
