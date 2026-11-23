@@ -3,6 +3,24 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3] - 2026-11-23
+
+### Changed
+
+- **Marketplace action name is now `ai-pr-sentinel`.** GitHub rejected
+  `pr-sentinel-ai` at Marketplace publish time: an organization named
+  `pr-sentinel-ai` already exists, and GitHub requires action names to
+  be unique across actions, users and organizations ("Name must be
+  unique. Cannot match an existing action, user or organization
+  name."). Only the `action.yml` name changes — the PyPI distribution
+  name stays `pr-sentinel-ai`, the Python import package stays
+  `pr_sentinel`, the console command stays `pr-sentinel`, and the
+  repository stays `vadofespanili-cyber/pr-sentinel`. v0.2.3 is the
+  first release carrying the listable name; check the Marketplace box
+  on this release, not on v0.2.2.
+- The example workflow (`examples/github-workflow.yml`) now pins
+  `@v0.2.3`.
+
 ## [0.2.2] - 2026-11-23
 
 ### Changed
