@@ -16,11 +16,13 @@ from .config import (
     api_key_from_env,
     github_token_from_env,
     load_config,
+    resolve_instructions,
 )
-from .diff import DiffFile, parse_diff
+from .diff import DiffFile, parse_diff, sort_by_risk
 from .findings import SEVERITY_RANK, Finding, filter_findings, sort_findings
 from .github_client import GitHubClient, GitHubError
 from .reporter import (
+    INLINE_MARKER,
     SUMMARY_MARKER,
     build_inline_comments,
     build_summary,
@@ -65,6 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
         "(overrides the config file; default: no gate).",
     )
     review.add_argument(
+        "--api-format",
+        type=_normalize_api_format_value,
+        choices=["responses", "chat_completions"],
+        default=None,
+        help="Model API format (overrides the config file; default: "
+        "responses). Use chat_completions for OpenRouter, Ollama, "
+        "Groq, vLLM and other OpenAI-compatible providers.",
+    )
+    review.add_argument(
         "--reviewed-commit",
         default=None,
         help="Full commit SHA the review covers; shown as "
@@ -88,6 +99,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Exit 1 if any reported finding meets this severity "
         "(overrides the config file; default: no gate).",
+    )
+    review_diff.add_argument(
+        "--api-format",
+        type=_normalize_api_format_value,
+        choices=["responses", "chat_completions"],
+        default=None,
+        help="Model API format (overrides the config file; default: "
+        "responses). Use chat_completions for OpenRouter, Ollama, "
+        "Groq, vLLM and other OpenAI-compatible providers.",
     )
     review_diff.add_argument(
         "--reviewed-commit",
@@ -131,6 +151,8 @@ def _cmd_check_config(config_path: str | None) -> int:
 def _cmd_review_diff(args: argparse.Namespace) -> int:
     try:
         config = load_config(args.config)
+        _apply_api_format_override(config, args)
+        instructions = resolve_instructions(config)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -148,12 +170,15 @@ def _cmd_review_diff(args: argparse.Namespace) -> int:
         sarif_out=args.sarif_out,
         fail_on_severity=_effective_fail_on_severity(config, args),
         reviewed_commit=args.reviewed_commit,
+        instructions=instructions,
     )
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
     try:
         config = load_config(args.config)
+        _apply_api_format_override(config, args)
+        instructions = resolve_instructions(config)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -180,6 +205,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         pr_title=title,
         pr_number=args.pr,
         reviewed_commit=args.reviewed_commit,
+        instructions=instructions,
     )
     if not args.dry_run:
         try:
@@ -233,15 +259,160 @@ def _post_review(
     if config.mode != "inline":
         return
     inline = build_inline_comments(findings, files)[: config.max_inline_comments]
-    if not inline:
+    if inline:
+        inline = _dedupe_inline_comments(client, owner, repo, pr_number, inline)
+    if inline:
+        body = (
+            f"pr-sentinel posted {len(inline)} inline comment(s) below; "
+            "the full findings table is in the summary comment."
+        )
+        client.create_review(
+            owner, repo, pr_number, body=body, comments=inline, event="COMMENT"
+        )
+    # Best effort only: resolving stale threads must never fail the
+    # review, so any error here becomes a warning, not an exception.
+    _resolve_outdated_threads(client, owner, repo, pr_number, findings)
+
+
+def _normalize_inline_body(body: str) -> str:
+    """Collapse whitespace so identical comments compare equal even
+    when GitHub normalizes line endings or trailing spaces."""
+    return " ".join(body.split())
+
+
+def _dedupe_inline_comments(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    comments: list[dict[str, str | int]],
+) -> list[dict[str, str | int]]:
+    """Drop inline comments we already posted on this PR.
+
+    An existing review comment counts as a duplicate when it was posted
+    by this bot / token user, carries our inline marker, and matches
+    the new comment on (path, line, normalized body). A failed listing
+    does not block the review: the comments are posted as usual and a
+    warning is printed.
+    """
+    try:
+        existing = client.list_pull_review_comments(owner, repo, pr_number)
+    except GitHubError as exc:
+        print(
+            f"warning: could not list existing review comments "
+            f"({exc}); posting inline comments without deduplication",
+            file=sys.stderr,
+        )
+        return comments
+    seen: set[tuple[str, int, str]] = set()
+    for comment in existing:
+        body = comment.get("body")
+        if not (isinstance(body, str) and INLINE_MARKER in body):
+            continue
+        if not _is_own_comment(client, comment):
+            continue
+        path = comment.get("path")
+        line = comment.get("line")
+        if not isinstance(path, str) or not isinstance(line, int):
+            continue
+        seen.add((path, line, _normalize_inline_body(body)))
+    kept = []
+    for comment in comments:
+        body = comment.get("body")
+        key = (
+            str(comment.get("path")),
+            int(comment["line"]) if isinstance(comment.get("line"), int) else -1,
+            _normalize_inline_body(body) if isinstance(body, str) else "",
+        )
+        if key in seen:
+            continue
+        kept.append(comment)
+        seen.add(key)
+    return kept
+
+
+def _resolve_outdated_threads(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    findings: list[Finding],
+) -> None:
+    """Resolve our own inline threads whose finding is gone.
+
+    A thread is resolved when it is still open, belongs to us (its
+    comments carry the inline marker and an author that is this bot or
+    the token user), and its (path, line) is no longer in the current
+    findings. Any failure (GraphQL error, missing permission) prints a
+    warning and the review still succeeds — this is best effort.
+    """
+    current: set[tuple[str, int]] = {
+        (finding.file, finding.line) for finding in findings if finding.line is not None
+    }
+    try:
+        threads = client.list_review_threads(owner, repo, pr_number)
+    except GitHubError as exc:
+        print(
+            f"warning: could not list review threads ({exc}); "
+            "leaving existing inline comments unresolved",
+            file=sys.stderr,
+        )
         return
-    body = (
-        f"pr-sentinel posted {len(inline)} inline comment(s) below; "
-        "the full findings table is in the summary comment."
-    )
-    client.create_review(
-        owner, repo, pr_number, body=body, comments=inline, event="COMMENT"
-    )
+    me: str | None = None
+    try:
+        authenticated = client.get_authenticated_user()
+        if isinstance(authenticated, dict):
+            login = authenticated.get("login")
+            me = login if isinstance(login, str) else None
+    except GitHubError:
+        me = None
+    for thread in threads:
+        if thread.get("isResolved"):
+            continue
+        path = thread.get("path")
+        line = thread.get("line")
+        if not isinstance(path, str) or not isinstance(line, int):
+            continue
+        if (path, line) in current:
+            continue
+        if not _is_own_thread(thread, me):
+            continue
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or not thread_id:
+            continue
+        try:
+            client.resolve_review_thread(thread_id)
+        except GitHubError as exc:
+            print(
+                f"warning: could not resolve review thread {thread_id} ({exc})",
+                file=sys.stderr,
+            )
+
+
+def _is_own_thread(thread: dict[str, Any], me: str | None) -> bool:
+    """True when a review thread was opened by this bot / token user.
+
+    At least one comment in the thread must carry our inline marker,
+    and its author must be the token user or a bot account
+    (``github-actions[bot]`` and friends end in ``[bot]``).
+    """
+    comments = thread.get("comments") or {}
+    nodes = comments.get("nodes") if isinstance(comments, dict) else None
+    if not isinstance(nodes, list):
+        return False
+    for comment in nodes:
+        if not isinstance(comment, dict):
+            continue
+        body = comment.get("body")
+        if not (isinstance(body, str) and INLINE_MARKER in body):
+            continue
+        author = comment.get("author")
+        login = author.get("login") if isinstance(author, dict) else None
+        if not isinstance(login, str) or not login:
+            continue
+        if login == me or login.endswith("[bot]"):
+            return True
+    return False
 
 
 def _find_summary_comment(
@@ -295,6 +466,7 @@ def _run_and_report(
     fail_on_severity: str | None = None,
     sarif_out: str | None = None,
     reviewed_commit: str | None = None,
+    instructions: str | None = None,
 ) -> int:
     summary, findings, _files = _prepare_review(
         config,
@@ -302,6 +474,7 @@ def _run_and_report(
         pr_title=pr_title,
         pr_number=pr_number,
         reviewed_commit=reviewed_commit,
+        instructions=instructions,
     )
     print(summary)
     return _finish_outputs(
@@ -311,6 +484,22 @@ def _run_and_report(
         sarif_out=sarif_out,
         severity_threshold=config.severity_threshold,
     )
+
+
+def _normalize_api_format_value(value: str) -> str:
+    """Normalize an --api-format value: case- and whitespace-insensitive.
+    argparse applies this before its choices check, so an uppercase
+    value works and an invalid one still exits 2."""
+    return value.strip().lower()
+
+
+def _apply_api_format_override(config: Config, args: argparse.Namespace) -> None:
+    """The --api-format flag wins over the config file (like
+    --fail-on-severity). A missing flag leaves the config value alone."""
+    raw = getattr(args, "api_format", None)
+    if raw is not None:
+        config.api_format = raw
+        config.validate()
 
 
 def _normalize_gate_value(value: str) -> str:
@@ -412,17 +601,20 @@ def _prepare_review(
     pr_title: str = "",
     pr_number: int | None = None,
     reviewed_commit: str | None = None,
+    instructions: str | None = None,
 ) -> tuple[str, list[Finding], list[DiffFile]]:
     """Parse, limit and review the diff, then filter and summarize.
 
     Order matters: ignored files are dropped before the file-count limit
     and before any review work, so they consume neither the ``max_files``
-    quota nor AI tokens. The size limit is applied after parsing, by
-    dropping whole trailing hunks/files — never by cutting raw text
-    mid-hunk.
+    quota nor AI tokens. Files are then sorted by risk tier, so the
+    size limit and the file-count limit drop the lowest-risk files
+    first. The size limit is applied after parsing, by dropping whole
+    trailing hunks/files — never by cutting raw text mid-hunk.
     """
     files = parse_diff(diff_text)
     files = _drop_ignored_files(files, config.ignore_paths)
+    files = sort_by_risk(files)
     files = _limit_diff_size(files, config.max_diff_chars)
     if len(files) > config.max_files:
         print(
@@ -430,7 +622,7 @@ def _prepare_review(
             file=sys.stderr,
         )
         files = files[: config.max_files]
-    findings, ai_used = _collect_findings(files, config)
+    findings, ai_used = _collect_findings(files, config, instructions=instructions)
     findings = sort_findings(
         filter_findings(findings, threshold=config.severity_threshold)
     )
@@ -510,7 +702,7 @@ def _limit_diff_size(files: list[DiffFile], max_chars: int) -> list[DiffFile]:
 
 
 def _collect_findings(
-    files: list[DiffFile], config: Config
+    files: list[DiffFile], config: Config, instructions: str | None = None
 ) -> tuple[list[Finding], bool]:
     """Run static checks and (when an API key is set) the AI reviewer.
 
@@ -541,9 +733,16 @@ def _collect_findings(
         )
     try:
         reviewer = Reviewer(
-            api_key=api_key, base_url=config.api_base_url, model=config.model
+            api_key=api_key,
+            base_url=config.api_base_url,
+            model=config.model,
+            api_format=config.api_format,
         )
-        findings.extend(reviewer.review(files, max_chars=config.max_diff_chars))
+        findings.extend(
+            reviewer.review(
+                files, max_chars=config.max_diff_chars, instructions=instructions
+            )
+        )
     except ReviewerError as exc:
         print(
             f"warning: AI review failed ({exc}); continuing with static checks only",
