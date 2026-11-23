@@ -201,3 +201,121 @@ def test_chunking_single_chunk_when_it_fits():
     for f in files:
         for hunk in f.hunks:
             assert hunk.render() in chunks[0].text
+
+
+# --- v0.3.0: hunk section + risk-prioritized ordering -----------------------
+
+
+def test_hunk_section_is_preserved_and_rendered():
+    diff = (
+        "diff --git a/src/a.py b/src/a.py\n"
+        "--- a/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -10,5 +10,7 @@ def foo():\n"
+        " context\n"
+        "+added\n"
+    )
+    files = parse_diff(diff)
+    assert files[0].hunks[0].section == " def foo():"
+    assert "@@ -10,5 +10,7 @@ def foo():" in files[0].render_patch()
+
+
+def test_hunk_without_section_renders_plain_header():
+    files = parse_diff(MULTI_FILE_DIFF)
+    assert files[0].hunks[0].section == ""
+    assert "@@ -1,3 +1,4 @@\n" in files[0].render_patch()
+
+
+def test_hunk_whitespace_only_section_is_empty():
+    diff = (
+        "diff --git a/src/a.py b/src/a.py\n"
+        "--- a/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -1,1 +1,2 @@   \n"
+        " context\n"
+        "+added\n"
+    )
+    files = parse_diff(diff)
+    assert files[0].hunks[0].section == ""
+
+
+def test_risk_tier_table():
+    from pr_sentinel.diff import risk_tier
+
+    tier1 = [
+        ".github/workflows/ci.yml",
+        "Dockerfile",
+        "Dockerfile.dev",
+        "action.yml",
+        "action.yaml",
+        "entrypoint.sh",
+        "src/auth/login.py",
+        "src/security/crypto.py",
+        "src/crypto_utils.py",
+    ]
+    tier2 = ["src/app.py", "src/main.py", "lib/util.py", "src/author.py"]
+    tier3 = [
+        "tests/test_app.py",
+        "test/test_app.py",
+        "src/app_test.py",
+        "src/app.test.js",
+        "src/app.spec.ts",
+        "src/test_helper.py",
+    ]
+    tier4 = [
+        "README.md",
+        "docs/guide.md",
+        "doc/api.rst",
+        "package-lock.json",
+        "poetry.lock",
+        "yarn.lock",
+        "Cargo.lock",
+        "pnpm-lock.yaml",
+        "static/app.min.js",
+        "static/app.min.css",
+        "static/app.js.map",
+    ]
+    for path in tier1:
+        assert risk_tier(path) == 1, path
+    for path in tier2:
+        assert risk_tier(path) == 2, path
+    for path in tier3:
+        assert risk_tier(path) == 3, path
+    for path in tier4:
+        assert risk_tier(path) == 4, path
+
+
+def test_sort_by_risk_is_stable_within_tiers():
+    from pr_sentinel.diff import sort_by_risk
+
+    def _file(path):
+        return parse_diff(
+            f"diff --git a/{path} b/{path}\n"
+            f"--- a/{path}\n"
+            f"+++ b/{path}\n"
+            "@@ -1,1 +1,2 @@\n"
+            " context\n"
+            "+added\n"
+        )[0]
+
+    files = [
+        _file("README.md"),
+        _file("src/b.py"),
+        _file(".github/workflows/ci.yml"),
+        _file("tests/test_b.py"),
+        _file("src/a.py"),
+        _file("docs/guide.md"),
+        _file("Dockerfile"),
+        _file("tests/test_a.py"),
+    ]
+    ordered = [f.path for f in sort_by_risk(files)]
+    assert ordered == [
+        ".github/workflows/ci.yml",
+        "Dockerfile",
+        "src/b.py",
+        "src/a.py",
+        "tests/test_b.py",
+        "tests/test_a.py",
+        "README.md",
+        "docs/guide.md",
+    ]
