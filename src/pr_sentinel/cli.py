@@ -346,12 +346,17 @@ def _resolve_outdated_threads(
     A thread is resolved when it is still open, belongs to us (its
     comments carry the inline marker and an author that is this bot or
     the token user), and its (path, line) is no longer in the current
-    findings. Any failure (GraphQL error, missing permission) prints a
-    warning and the review still succeeds — this is best effort.
+    findings. A thread whose line is null — its diff position is
+    outdated — is resolved only when its file has no current findings
+    at any line: if a finding remains in that file it may have moved
+    to another line, and resolving the old thread would be wrong. Any
+    failure (GraphQL error, missing permission) prints a warning and
+    the review still succeeds — this is best effort.
     """
     current: set[tuple[str, int]] = {
         (finding.file, finding.line) for finding in findings if finding.line is not None
     }
+    current_paths: set[str] = {finding.file for finding in findings}
     try:
         threads = client.list_review_threads(owner, repo, pr_number)
     except GitHubError as exc:
@@ -373,10 +378,15 @@ def _resolve_outdated_threads(
         if thread.get("isResolved"):
             continue
         path = thread.get("path")
-        line = thread.get("line")
-        if not isinstance(path, str) or not isinstance(line, int):
+        if not isinstance(path, str):
             continue
-        if (path, line) in current:
+        line = thread.get("line")
+        if isinstance(line, int):
+            if (path, line) in current:
+                continue
+        elif path in current_paths:
+            # Outdated position (null line): only certainly stale when
+            # the file has no current findings left at all.
             continue
         if not _is_own_thread(thread, me):
             continue
