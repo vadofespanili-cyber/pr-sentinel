@@ -23,6 +23,39 @@ SAMPLE_DIFF = (
 )
 
 
+SAMPLE_THREADS = [
+    {
+        "id": "T1",
+        "isResolved": False,
+        "path": "src/a.py",
+        "line": 2,
+        "comments": {
+            "nodes": [
+                {
+                    "body": "**high · bug**\n\nUnused import.\n\n"
+                    "<!-- pr-sentinel:inline -->",
+                    "author": {"login": "github-actions[bot]"},
+                }
+            ]
+        },
+    },
+    {
+        "id": "T2",
+        "isResolved": True,
+        "path": "src/a.py",
+        "line": 3,
+        "comments": {
+            "nodes": [
+                {
+                    "body": "Already resolved.",
+                    "author": {"login": "github-actions[bot]"},
+                }
+            ]
+        },
+    },
+]
+
+
 class FakeGitHubHandler(BaseHTTPRequestHandler):
     """Tiny fake GitHub API; every request is recorded on the class."""
 
@@ -75,6 +108,20 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {"number": 1, "title": "Test PR"})
             return
+        if parsed.path == "/repos/o/r/pulls/1/comments":
+            page = int(parse_qs(parsed.query).get("page", ["1"])[0])
+            if page == 1:
+                items = [
+                    {"id": i, "path": "a.py", "line": i, "body": f"c{i}"}
+                    for i in range(100)
+                ]
+            elif page == 2:
+                items = [{"id": 100, "path": "a.py", "line": 100, "body": "c100"}]
+            else:
+                items = []
+            self._record()
+            self._send_json(200, items)
+            return
         if parsed.path == "/user":
             self._record()
             self._send_json(200, {"login": "github-actions[bot]", "type": "Bot"})
@@ -90,6 +137,38 @@ class FakeGitHubHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"id": 99, "state": "COMMENTED"})
         elif self.path == "/repos/o/r/issues/1/labels":
             self._send_json(200, [{"name": "needs-review"}])
+        elif self.path == "/graphql":
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {}
+            query = payload.get("query", "") if isinstance(payload, dict) else ""
+            if "resolveReviewThread" in query:
+                self._send_json(
+                    200,
+                    {
+                        "data": {
+                            "resolveReviewThread": {
+                                "thread": {"id": "T1", "isResolved": True}
+                            }
+                        }
+                    },
+                )
+            elif "reviewThreads" in query:
+                self._send_json(
+                    200,
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {"nodes": SAMPLE_THREADS}
+                                }
+                            }
+                        }
+                    },
+                )
+            else:
+                self._send_json(200, {"data": {}, "errors": [{"message": "bad query"}]})
         else:
             self._send_json(404, {"message": "Not Found"})
 
@@ -518,3 +597,44 @@ def test_patch_500_is_not_retried(scripted_server, monkeypatch):
     assert excinfo.value.status == 500
     assert scripted_server.hits == 1
     assert delays == []
+
+
+# --- v0.3.0: inline comments + GraphQL threads -------------------------------
+
+
+def test_list_pull_review_comments_pagination(client):
+    comments = client.list_pull_review_comments("o", "r", 1)
+    assert len(comments) == 101
+    assert comments[0]["id"] == 0
+    assert comments[-1]["id"] == 100
+    paths = [r["path"] for r in FakeGitHubHandler.requests]
+    assert "/repos/o/r/pulls/1/comments?per_page=100&page=1" in paths
+    assert "/repos/o/r/pulls/1/comments?per_page=100&page=2" in paths
+
+
+def test_list_review_threads_returns_nodes(client):
+    threads = client.list_review_threads("o", "r", 1)
+    assert [t["id"] for t in threads] == ["T1", "T2"]
+    assert threads[0]["path"] == "src/a.py"
+    assert threads[0]["line"] == 2
+    assert threads[0]["isResolved"] is False
+    request = FakeGitHubHandler.requests[-1]
+    assert request["method"] == "POST"
+    assert request["path"] == "/graphql"
+    payload = json.loads(request["body"])
+    assert "reviewThreads" in payload["query"]
+    assert payload["variables"] == {"owner": "o", "repo": "r", "number": 1}
+
+
+def test_resolve_review_thread_posts_mutation(client):
+    resolved = client.resolve_review_thread("T1")
+    assert resolved == {"id": "T1", "isResolved": True}
+    request = FakeGitHubHandler.requests[-1]
+    payload = json.loads(request["body"])
+    assert "resolveReviewThread" in payload["query"]
+    assert payload["variables"] == {"threadId": "T1"}
+
+
+def test_graphql_errors_raise_github_error(client):
+    with pytest.raises(GitHubError, match="bad query"):
+        client.graphql("query { nonsense }")
