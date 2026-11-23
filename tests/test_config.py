@@ -261,11 +261,16 @@ def test_instructions_blank_string_is_none():
     assert Config(instructions="   ").instructions is None
 
 
-def test_instructions_file(tmp_path):
-    rules = tmp_path / "review-rules.md"
+def test_instructions_file(tmp_path, monkeypatch):
+    # The file is resolved relative to the config file's directory,
+    # not the working directory.
+    subdir = tmp_path / "config"
+    subdir.mkdir()
+    rules = subdir / "review-rules.md"
     rules.write_text("Never suggest tabs.\n", encoding="utf-8")
-    config_path = tmp_path / ".pr-sentinel.yml"
-    config_path.write_text(f"instructions_file: {rules}\n", encoding="utf-8")
+    config_path = subdir / ".pr-sentinel.yml"
+    config_path.write_text("instructions_file: review-rules.md\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     config = load_config(str(config_path))
     assert resolve_instructions(config) == "Never suggest tabs.\n"
 
@@ -273,22 +278,63 @@ def test_instructions_file(tmp_path):
 def test_instructions_file_wins_over_inline(tmp_path):
     rules = tmp_path / "review-rules.md"
     rules.write_text("File wins.\n", encoding="utf-8")
-    config = parse_config_text(f"instructions: Inline.\ninstructions_file: {rules}\n")
+    config = parse_config_text(
+        "instructions: Inline.\ninstructions_file: review-rules.md\n",
+        base_dir=str(tmp_path),
+    )
     assert resolve_instructions(config) == "File wins.\n"
 
 
 def test_instructions_file_missing_raises(tmp_path):
-    config = Config(instructions_file=str(tmp_path / "no-such-rules.md"))
+    config = Config(instructions_file="no-such-rules.md", config_dir=str(tmp_path))
     with pytest.raises(ConfigError, match="instructions_file not found"):
         config.validate()
+
+
+def test_instructions_file_absolute_path_rejected(tmp_path):
+    # Absolute paths are never read, even when the file exists.
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("Secret rules.\n", encoding="utf-8")
+    config = Config(instructions_file=str(rules))
+    with pytest.raises(ConfigError, match="must be a relative path"):
+        config.validate()
+    with pytest.raises(ConfigError, match="must be a relative path"):
+        resolve_instructions(config)
+    # /etc/passwd is the canonical traversal target.
+    with pytest.raises(ConfigError, match="must be a relative path"):
+        Config(instructions_file="/etc/passwd").validate()
+
+
+def test_instructions_file_dotdot_escape_rejected(tmp_path):
+    # A file that exists outside the config directory is still
+    # rejected: ".." must not escape the config directory.
+    outside = tmp_path / "outside.md"
+    outside.write_text("Outside rules.\n", encoding="utf-8")
+    subdir = tmp_path / "config"
+    subdir.mkdir()
+    config = Config(instructions_file="../outside.md", config_dir=str(subdir))
+    with pytest.raises(ConfigError, match="escapes the config directory"):
+        config.validate()
+    with pytest.raises(ConfigError, match="escapes the config directory"):
+        resolve_instructions(config)
 
 
 def test_instructions_file_deleted_after_load_raises(tmp_path):
     rules = tmp_path / "review-rules.md"
     rules.write_text("Gone soon.\n", encoding="utf-8")
-    config = Config(instructions_file=str(rules))
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
     config.validate()
     rules.unlink()
+    with pytest.raises(ConfigError, match="not readable"):
+        resolve_instructions(config)
+
+
+def test_instructions_file_invalid_utf8_raises(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_bytes(b"Not text: \xff\xfe\x00\n")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="not readable"):
+        config.validate()
     with pytest.raises(ConfigError, match="not readable"):
         resolve_instructions(config)
 
@@ -304,6 +350,6 @@ def test_instructions_over_cap_raises():
 def test_instructions_file_over_cap_raises(tmp_path):
     rules = tmp_path / "review-rules.md"
     rules.write_text("x" * 4001, encoding="utf-8")
-    config = Config(instructions_file=str(rules))
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
     with pytest.raises(ConfigError, match="4000"):
         config.validate()
