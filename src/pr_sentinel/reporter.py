@@ -15,6 +15,11 @@ from .findings import SEVERITIES, Finding
 # spam the PR with a new summary comment each time.
 SUMMARY_MARKER = "<!-- pr-sentinel:summary -->"
 
+# Hidden marker in every inline comment: it tags the comment as ours,
+# so re-pushes can skip re-posting an identical comment and can resolve
+# the thread when the finding is gone.
+INLINE_MARKER = "<!-- pr-sentinel:inline -->"
+
 _AI_NOTE = (
     "> **Note:** These findings are AI-generated suggestions. "
     "Please verify them before acting on them."
@@ -121,6 +126,9 @@ def build_inline_comments(
         body = f"**{finding.severity} · {finding.category}**\n\n{finding.message}"
         if finding.suggestion:
             body += f"\n\n**Suggestion:** {finding.suggestion}"
+        # Hidden marker: tags the comment as ours for deduplication
+        # and thread resolution on re-pushes.
+        body += f"\n\n{INLINE_MARKER}"
         comments.append(
             {
                 "path": finding.file,
