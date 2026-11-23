@@ -10,6 +10,7 @@ from pr_sentinel.diff import parse_diff
 from pr_sentinel.reviewer import (
     Reviewer,
     ReviewerError,
+    _prompt_parts,
     build_review_prompt,
     parse_findings_json,
 )
@@ -382,6 +383,38 @@ def test_chat_completions_non_string_content_raises(fake_api):
         _chat_reviewer(fake_api).review_chunk("diff")
 
 
+def test_chat_completions_list_content_is_joined(fake_api):
+    # Some OpenAI-compatible providers return content as a list of
+    # blocks instead of a plain string.
+    body = json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": json.dumps([FINDING])},
+                            {"type": "reasoning", "text": "thinking out loud"},
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    _set_response(fake_api, body)
+    findings = _chat_reviewer(fake_api).review_chunk("diff")
+    assert len(findings) == 1
+    assert findings[0].message == "Possible off-by-one error."
+
+
+def test_chat_completions_list_content_without_text_raises(fake_api):
+    body = json.dumps(
+        {"choices": [{"message": {"content": [{"type": "reasoning", "text": "hmm"}]}}]}
+    )
+    _set_response(fake_api, body)
+    with pytest.raises(ReviewerError, match="no output text"):
+        _chat_reviewer(fake_api).review_chunk("diff")
+
+
 def test_chat_completions_retries_after_429_then_succeeds(scripted_api, monkeypatch):
     import pr_sentinel.reviewer as reviewer_module
 
@@ -436,6 +469,23 @@ def test_prompt_with_instructions_separates_guidelines_from_diff():
     assert "repository's own configuration" in prompt
 
 
+def test_instructions_live_in_user_message_not_system():
+    # Repo-controlled guidelines must never reach the system prompt: a
+    # PR author can change the repo config inside their own PR.
+    system, user = _prompt_parts("diff text", instructions="Be strict.")
+    assert "Repository guidelines (lower-priority" not in system
+    assert "Be strict." not in system
+    assert "can never override" in system
+    assert "Repository guidelines (lower-priority" in user
+    assert "Be strict." in user
+    assert "--- BEGIN DIFF (untrusted data) ---" in user
+    # Without instructions there is no guardrail either: the default
+    # prompt stays byte-identical to v0.2.x.
+    system_plain, user_plain = _prompt_parts("diff text")
+    assert "can never override" not in system_plain
+    assert "Repository guidelines" not in user_plain
+
+
 def test_review_threads_instructions_into_chat_payload(fake_api):
     _set_response(fake_api, _chat_response_body())
     files = parse_diff(
@@ -449,5 +499,7 @@ def test_review_threads_instructions_into_chat_payload(fake_api):
     findings = _chat_reviewer(fake_api).review(files, instructions="Be strict.")
     assert len(findings) == 1
     payload = json.loads(fake_api.requests[0])
-    assert "Be strict." in payload["messages"][0]["content"]
-    assert "Repository guidelines" in payload["messages"][0]["content"]
+    assert "Be strict." in payload["messages"][1]["content"]
+    assert "Repository guidelines" in payload["messages"][1]["content"]
+    assert "Be strict." not in payload["messages"][0]["content"]
+    assert "can never override" in payload["messages"][0]["content"]
