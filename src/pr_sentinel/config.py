@@ -25,8 +25,13 @@ KNOWN_KEYS = {
     "mode",
     "max_inline_comments",
     "api_base_url",
+    "api_format",
+    "instructions",
+    "instructions_file",
 }
 MODES = ("inline", "summary")
+API_FORMATS = ("responses", "chat_completions")
+MAX_INSTRUCTIONS_CHARS = 4000
 DEFAULT_API_BASE_URL = "https://api.openai.com/v1"
 ENV_API_KEY = "PR_SENTINEL_API_KEY"
 ENV_GITHUB_TOKEN = "GITHUB_TOKEN"
@@ -47,6 +52,9 @@ class Config:
     mode: str = "inline"
     max_inline_comments: int = 20
     api_base_url: str = DEFAULT_API_BASE_URL
+    api_format: str = "responses"
+    instructions: str | None = None
+    instructions_file: str | None = None
 
     def __post_init__(self) -> None:
         # Normalize the gate: case- and whitespace-insensitive, and
@@ -56,6 +64,18 @@ class Config:
         if isinstance(self.fail_on_severity, str):
             normalized = self.fail_on_severity.strip().lower()
             self.fail_on_severity = None if normalized in ("", "none") else normalized
+        # Same normalization for the provider format: "Chat_Completions",
+        # " CHAT_COMPLETIONS " and "chat_completions" are one value.
+        if isinstance(self.api_format, str):
+            self.api_format = self.api_format.strip().lower()
+        # A blank instructions string (or file path) is the same as
+        # not setting one.
+        if isinstance(self.instructions, str) and not self.instructions.strip():
+            self.instructions = None
+        if isinstance(self.instructions_file, str) and (
+            not self.instructions_file.strip()
+        ):
+            self.instructions_file = None
 
     def validate(self) -> None:
         if not isinstance(self.model, str) or not self.model:
@@ -75,6 +95,47 @@ class Config:
             )
         if self.mode not in MODES:
             raise ConfigError(f"mode must be one of {list(MODES)}, got {self.mode!r}")
+        if self.api_format not in API_FORMATS:
+            raise ConfigError(
+                f"api_format must be one of {list(API_FORMATS)}, "
+                f"got {self.api_format!r}"
+            )
+        if self.instructions is not None and not isinstance(self.instructions, str):
+            raise ConfigError(
+                f"instructions must be a string, got {self.instructions!r}"
+            )
+        if self.instructions is not None and (
+            len(self.instructions) > MAX_INSTRUCTIONS_CHARS
+        ):
+            raise ConfigError(
+                "instructions is too long: "
+                f"{len(self.instructions)} characters, "
+                f"max {MAX_INSTRUCTIONS_CHARS}"
+            )
+        if self.instructions_file is not None:
+            if not isinstance(self.instructions_file, str):
+                raise ConfigError(
+                    "instructions_file must be a string, "
+                    f"got {self.instructions_file!r}"
+                )
+            if not os.path.isfile(self.instructions_file):
+                raise ConfigError(
+                    f"instructions_file not found: {self.instructions_file!r}"
+                )
+            try:
+                with open(self.instructions_file, encoding="utf-8") as handle:
+                    file_text = handle.read()
+            except OSError as exc:
+                raise ConfigError(
+                    "instructions_file is not readable: "
+                    f"{self.instructions_file!r} ({exc})"
+                ) from exc
+            if len(file_text) > MAX_INSTRUCTIONS_CHARS:
+                raise ConfigError(
+                    "instructions_file is too long: "
+                    f"{len(file_text)} characters, "
+                    f"max {MAX_INSTRUCTIONS_CHARS}"
+                )
         if not isinstance(self.ignore_paths, list) or not all(
             isinstance(p, str) for p in self.ignore_paths
         ):
@@ -104,6 +165,27 @@ class Config:
 
 def default_config() -> Config:
     return Config()
+
+
+def resolve_instructions(config: Config) -> str | None:
+    """The effective repo instructions for the reviewer prompt.
+
+    ``instructions_file`` wins over inline ``instructions`` when both
+    are set (the file is the richer source). Returns None when neither
+    is set. Raises :class:`ConfigError` when the file cannot be read —
+    :meth:`Config.validate` already checks it exists and fits the cap,
+    so this only fires on a race (deleted between load and review).
+    """
+    if config.instructions_file is not None:
+        try:
+            with open(config.instructions_file, encoding="utf-8") as handle:
+                return handle.read()
+        except OSError as exc:
+            raise ConfigError(
+                "instructions_file is not readable: "
+                f"{config.instructions_file!r} ({exc})"
+            ) from exc
+    return config.instructions
 
 
 def find_config_file(start_dir: str = ".") -> str | None:
