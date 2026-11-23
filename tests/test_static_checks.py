@@ -306,6 +306,65 @@ def test_ignore_marker_inside_single_quote_multiline_string():
     assert findings[0].rule == "dangerous-eval"
 
 
+def test_ignore_marker_inside_template_literal_does_not_suppress():
+    # The bot's example: a // marker inside a backtick template
+    # literal is string content, not a comment: the eval() on the
+    # same line is still caught. (The marker on the source line is a
+    # Python comment outside the fixture string, so the checked diff
+    # text is unchanged; it keeps our own review of this PR from
+    # flagging the fixture itself.)
+    findings = _check(
+        ["const s = `// pr-sentinel: ignore`; eval(userInput)"]  # pr-sentinel: ignore
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_ignore_marker_on_middle_line_of_template_literal():
+    # The marker on a middle line of a multiline template literal
+    # must not suppress anything: the eval() after the literal
+    # closes fires.
+    lines = [
+        "const s = `",
+        "// pr-sentinel: ignore",
+        "`; eval(u)",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 4
+
+
+def test_ignore_marker_after_closed_template_literal_suppresses():
+    # Once the template literal has closed, a real comment marker
+    # on the same line still suppresses the finding.
+    lines = [
+        "const s = `",
+        "text`; eval(u)  // pr-sentinel: ignore",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert findings == []
+
+
+def test_interpolation_inside_template_literal_is_code():
+    # ${...} inside a template literal is code, not string content:
+    # an eval() inside the interpolation still fires.
+    findings = _check(["const s = `value: ${eval(x)}`"])  # pr-sentinel: ignore
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_escaped_backtick_does_not_close_template_literal():
+    # An escaped backtick inside a template literal does not close
+    # it: the marker after it is still inside the string, so the
+    # eval() on the line is still caught.
+    findings = _check(
+        ["const s = `a \\` b // pr-sentinel: ignore`; eval(u)"]  # pr-sentinel: ignore
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
 def test_real_words_ending_in_placeholder_are_not_suppressed():
     # "contest" / "protest" / "latest" end in "test" but are real words,
     # not fixtures — they must still fire. (The markers on the source
