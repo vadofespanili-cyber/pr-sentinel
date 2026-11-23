@@ -94,6 +94,22 @@ All notable changes to pr-sentinel are documented here. The format follows
   `pr-sentinel: ignore` inside a triple-quoted string no longer
   suppresses a finding on the line where the string closes. A real
   comment marker after the string closes still suppresses.
+- **Null-line review threads now resolve when their file is clean
+  (bot review).** A thread whose diff position is outdated (null
+  line) was skipped, so a finding fixed by removing or moving the
+  line stayed unresolved. It is now resolved when its file has no
+  current findings at any line; while the file still has a finding
+  it is left alone (the finding may have moved to another line).
+- **Real privilege separation on the Responses API path (bot
+  review).** The system prompt was concatenated with the user
+  content into one `input` string, so the API treated it as user
+  input and repo-controlled guidelines did not have the promised
+  lower priority. The system prompt is now sent in the Responses
+  API's separate `instructions` field, with the guidelines + diff
+  in `input` — the same separation the Chat Completions path gets
+  from its system/user roles. Note: `instructions` is part of the
+  Responses API, but a minimal provider that rejects it can be used
+  via `api_format: chat_completions` instead.
 
 ### Changed
 
