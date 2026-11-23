@@ -48,6 +48,10 @@ FAIL_ON_SEVERITY=$(_trim_ws "${INPUT_FAIL_ON_SEVERITY:-}")
 if [ -n "$FAIL_ON_SEVERITY" ]; then
   set -- "$@" --fail-on-severity "$FAIL_ON_SEVERITY"
 fi
+API_FORMAT=$(_trim_ws "${INPUT_API_FORMAT:-}")
+if [ -n "$API_FORMAT" ]; then
+  set -- "$@" --api-format "$API_FORMAT"
+fi
 SARIF_OUT=$(_trim_ws "${INPUT_SARIF_OUT:-}")
 if [ -n "$SARIF_OUT" ]; then
   set -- "$@" --sarif-out "$SARIF_OUT"
