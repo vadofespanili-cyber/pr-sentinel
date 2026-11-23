@@ -1,0 +1,44 @@
+# Publish pr-sentinel to PyPI when a GitHub release is published.
+#
+# Method: PyPI Trusted Publishing (OIDC) — no API token is stored anywhere.
+# One-time setup (see docs/publishing.md) before the first run:
+#   1. On PyPI, add a trusted publisher for this repository, workflow file
+#      ("publish.yml") and environment ("pypi"). A pending publisher can be
+#      created before the project exists; the project is created on first upload.
+#   2. On GitHub, create the "pypi" environment (Settings -> Environments).
+#      Adding yourself as a required reviewer is strongly recommended so a
+#      release cannot reach PyPI without an explicit human approval.
+#
+# Token fallback (NOT recommended): if Trusted Publishing is not configured,
+# create a project-scoped API token on PyPI, store it as the PYPI_API_TOKEN
+# repository secret, and uncomment the two lines under "with:" below.
+# The action then uploads with username "__token__" and that token.
+
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write  # Required for Trusted Publishing (OIDC).
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # with:
+        #   password: ${{ secrets.PYPI_API_TOKEN }}
