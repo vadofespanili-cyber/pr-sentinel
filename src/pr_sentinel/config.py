@@ -128,20 +128,7 @@ class Config:
                 raise ConfigError(
                     f"instructions_file not found: {self.instructions_file!r}"
                 )
-            try:
-                with open(resolved, encoding="utf-8") as handle:
-                    file_text = handle.read()
-            except (OSError, UnicodeDecodeError) as exc:
-                raise ConfigError(
-                    "instructions_file is not readable: "
-                    f"{self.instructions_file!r} ({exc})"
-                ) from exc
-            if len(file_text) > MAX_INSTRUCTIONS_CHARS:
-                raise ConfigError(
-                    "instructions_file is too long: "
-                    f"{len(file_text)} characters, "
-                    f"max {MAX_INSTRUCTIONS_CHARS}"
-                )
+            _read_instructions_file(resolved, self.instructions_file)
         if not isinstance(self.ignore_paths, list) or not all(
             isinstance(p, str) for p in self.ignore_paths
         ):
@@ -196,6 +183,32 @@ def _resolve_instructions_path(config: Config) -> str:
     return str(resolved)
 
 
+def _read_instructions_file(resolved: str, display_name: str | None) -> str:
+    """Read an instructions file, never reading past the size cap.
+
+    Reads at most ``MAX_INSTRUCTIONS_CHARS + 1`` characters: a file
+    over the cap is rejected without ever loading it fully into
+    memory. Raises :class:`ConfigError` when the file is unreadable
+    or over the cap. ``display_name`` is the value as written in the
+    config (used in error messages); ``resolved`` is the absolute
+    path that was already checked by :func:`_resolve_instructions_path`.
+    """
+    try:
+        with open(resolved, encoding="utf-8") as handle:
+            file_text = handle.read(MAX_INSTRUCTIONS_CHARS + 1)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(
+            f"instructions_file is not readable: {display_name!r} ({exc})"
+        ) from exc
+    if len(file_text) > MAX_INSTRUCTIONS_CHARS:
+        raise ConfigError(
+            "instructions_file is too long: "
+            f"{len(file_text)} characters, "
+            f"max {MAX_INSTRUCTIONS_CHARS}"
+        )
+    return file_text
+
+
 def resolve_instructions(config: Config) -> str | None:
     """The effective repo instructions for the reviewer prompt.
 
@@ -204,18 +217,13 @@ def resolve_instructions(config: Config) -> str | None:
     is set. Raises :class:`ConfigError` when the file cannot be read —
     :meth:`Config.validate` already checks it exists and fits the cap,
     so this only fires on a race (deleted between load and review) or
-    on undecodable bytes.
+    on undecodable bytes. The file is read bounded (see
+    :func:`_read_instructions_file`), so a file that grew past the cap
+    since validation is rejected without loading it fully.
     """
     if config.instructions_file is not None:
         resolved = _resolve_instructions_path(config)
-        try:
-            with open(resolved, encoding="utf-8") as handle:
-                return handle.read()
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ConfigError(
-                "instructions_file is not readable: "
-                f"{config.instructions_file!r} ({exc})"
-            ) from exc
+        return _read_instructions_file(resolved, config.instructions_file)
     return config.instructions
 
 
