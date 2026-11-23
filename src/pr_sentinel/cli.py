@@ -258,9 +258,12 @@ def _post_review(
         client.create_issue_comment(owner, repo, pr_number, summary)
     if config.mode != "inline":
         return
-    inline = build_inline_comments(findings, files)[: config.max_inline_comments]
+    # Deduplicate BEFORE the max_inline_comments cut: previously posted
+    # findings would otherwise crowd out new findings on re-pushes.
+    inline = build_inline_comments(findings, files)
     if inline:
         inline = _dedupe_inline_comments(client, owner, repo, pr_number, inline)
+    inline = inline[: config.max_inline_comments]
     if inline:
         body = (
             f"pr-sentinel posted {len(inline)} inline comment(s) below; "
@@ -392,27 +395,31 @@ def _resolve_outdated_threads(
 def _is_own_thread(thread: dict[str, Any], me: str | None) -> bool:
     """True when a review thread was opened by this bot / token user.
 
-    At least one comment in the thread must carry our inline marker,
-    and its author must be the token user or a bot account
-    (``github-actions[bot]`` and friends end in ``[bot]``).
+    Only the thread's root comment (``nodes[0]``) is inspected: it must
+    carry our inline marker and be authored by a bot account. In
+    GitHub Actions the GraphQL author login is ``github-actions``
+    (without the ``[bot]`` suffix) and ``GET /user`` fails with 403 on
+    ``GITHUB_TOKEN``, so the author ``__typename == "Bot"`` is the
+    check that actually works there; the login checks cover
+    personal-access-token runs.
     """
     comments = thread.get("comments") or {}
     nodes = comments.get("nodes") if isinstance(comments, dict) else None
-    if not isinstance(nodes, list):
+    if not isinstance(nodes, list) or not nodes:
         return False
-    for comment in nodes:
-        if not isinstance(comment, dict):
-            continue
-        body = comment.get("body")
-        if not (isinstance(body, str) and INLINE_MARKER in body):
-            continue
-        author = comment.get("author")
-        login = author.get("login") if isinstance(author, dict) else None
-        if not isinstance(login, str) or not login:
-            continue
-        if login == me or login.endswith("[bot]"):
-            return True
-    return False
+    root = nodes[0]
+    if not isinstance(root, dict):
+        return False
+    body = root.get("body")
+    if not (isinstance(body, str) and INLINE_MARKER in body):
+        return False
+    author = root.get("author")
+    if not isinstance(author, dict):
+        return False
+    login = author.get("login")
+    if not isinstance(login, str) or not login:
+        return False
+    return author.get("__typename") == "Bot" or login == me or login.endswith("[bot]")
 
 
 def _find_summary_comment(
