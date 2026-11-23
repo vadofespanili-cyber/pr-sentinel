@@ -238,6 +238,45 @@ def test_ignore_marker_without_comment_does_not_suppress():
     assert findings[0].rule == "leaked-openai-key"
 
 
+def test_ignore_marker_inside_string_does_not_suppress():
+    # The marker inside a quoted string is not a comment: the eval()
+    # on the same line is still caught.
+    findings = _check(['x = "# pr-sentinel: ignore"; eval(u)'])
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_ignore_marker_survives_apostrophe_in_comment():
+    # An apostrophe in the comment ("don't") must not swallow the
+    # marker: the quote is only a string delimiter when it closes.
+    findings = _check(['x = eval("1")  # don\'t pr-sentinel: ignore'])
+    assert findings == []
+
+
+def test_real_words_ending_in_placeholder_are_not_suppressed():
+    # "contest" / "protest" / "latest" end in "test" but are real words,
+    # not fixtures — they must still fire. (The markers on the source
+    # lines are Python comments outside the fixture strings, so the
+    # checked diff text is unchanged; they keep our own review of this
+    # PR from flagging the fixtures themselves.)
+    lines = [
+        'password = "contest"',  # pr-sentinel: ignore
+        'password = "protest"',  # pr-sentinel: ignore
+        'password = "latest"',  # pr-sentinel: ignore
+        'token = "snowflake"',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert [f.rule for f in findings] == ["hardcoded-credential"] * 4
+
+
+def test_placeholder_word_with_digits_is_suppressed():
+    # "test123" is the canonical fixture shape: a placeholder word
+    # followed by digits. (It fired before this fix; the docstring
+    # claimed otherwise.)
+    findings = _check(['password = "test123"'])  # pr-sentinel: ignore
+    assert findings == []
+
+
 def test_placeholder_values_are_suppressed():
     lines = [
         'token = "ghp_test"',
