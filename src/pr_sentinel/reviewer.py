@@ -285,7 +285,12 @@ class Reviewer:
     default, ``POST {base_url}/responses``) and ``"chat_completions"``
     (``POST {base_url}/chat/completions`` with a standard ``messages``
     array) — the latter unlocks OpenRouter, Ollama, Groq, vLLM and any
-    OpenAI-compatible provider. Retry/backoff, timeout, JSON parsing
+    OpenAI-compatible provider. On the Responses path the system
+    prompt is sent in the API's separate ``instructions`` field and
+    the user content in ``input``, so the system rules keep their
+    privilege over the repo-controlled guidelines; the
+    chat_completions path gets the same separation from its
+    system/user roles. Retry/backoff, timeout, JSON parsing
     and the prompt-injection delimiters are identical for both.
     """
 
@@ -328,7 +333,17 @@ class Reviewer:
         else:
             url = f"{self.base_url}/responses"
             payload = json.dumps(
-                {"model": self.model, "input": system + "\n" + user}
+                {
+                    "model": self.model,
+                    # `instructions` is the Responses API's privileged
+                    # system field; the user content (repo guidelines
+                    # + diff) goes in `input`. Concatenating them into
+                    # one input string would demote the system rules to
+                    # user input, so repo-controlled guidelines could
+                    # override them.
+                    "instructions": system,
+                    "input": user,
+                }
             ).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
