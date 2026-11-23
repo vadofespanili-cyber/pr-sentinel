@@ -34,7 +34,10 @@ SAMPLE_THREADS = [
                 {
                     "body": "**high · bug**\n\nUnused import.\n\n"
                     "<!-- pr-sentinel:inline -->",
-                    "author": {"login": "github-actions[bot]"},
+                    "author": {
+                        "__typename": "Bot",
+                        "login": "github-actions",
+                    },
                 }
             ]
         },
@@ -48,7 +51,10 @@ SAMPLE_THREADS = [
             "nodes": [
                 {
                     "body": "Already resolved.",
-                    "author": {"login": "github-actions[bot]"},
+                    "author": {
+                        "__typename": "Bot",
+                        "login": "github-actions",
+                    },
                 }
             ]
         },
@@ -623,6 +629,7 @@ def test_list_review_threads_returns_nodes(client):
     assert request["path"] == "/graphql"
     payload = json.loads(request["body"])
     assert "reviewThreads" in payload["query"]
+    assert "__typename" in payload["query"]
     assert payload["variables"] == {"owner": "o", "repo": "r", "number": 1}
 
 
