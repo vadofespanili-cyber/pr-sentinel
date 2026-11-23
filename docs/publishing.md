@@ -1,6 +1,6 @@
 # Publishing pr-sentinel
 
-Status as of 2026-11-23, v0.2.3. Two destinations: **PyPI** and the
+Status as of 2026-11-23, v0.2.4. Two destinations: **PyPI** and the
 **GitHub Marketplace**. Nothing in this document uploads anything — it is
 the checklist for the first publish. The workflow file
 `.github/workflows/publish.yml` lands in this PR
@@ -149,7 +149,7 @@ screenshots, or keys in either artifact.
 | Item | Status |
 |---|---|
 | `action.yml`: name, description (31 chars; limit 125), author, `runs.docker` + `Dockerfile`, branding `eye` / `blue` | Valid |
-| Repository public, tagged releases (v0.2.3 latest), action already used by the self-review workflow | Ready |
+| Repository public, tagged releases (v0.2.4 latest), action already used by the self-review workflow | Ready |
 | Action name | **`ai-pr-sentinel`** — renamed in v0.2.3 (this PR); `pr-sentinel-ai` is blocked by an existing organization of that name |
 | Marketplace Developer Agreement accepted | **Accepted** — during the v0.2.2 listing attempt (§6) |
 | GitHub 2FA on Jalal's account | **Enabled 2026-11-23** — authenticator app (§6) |
