@@ -341,3 +341,51 @@ def test_empty_reviewed_commit_is_not_forwarded(stub_bin):
         )
         assert result.returncode == 0, result.stderr
         assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 42"
+
+
+# --- v0.3.0: api_format forwarding ------------------------------------------
+
+
+def test_api_format_is_forwarded(stub_bin):
+    """INPUT_API_FORMAT reaches the CLI as --api-format."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_API_FORMAT": "chat_completions",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert argv == "review --repo o/r --pr 42 --api-format chat_completions"
+
+
+def test_api_format_whitespace_is_trimmed(stub_bin):
+    """Surrounding whitespace is trimmed before forwarding."""
+    result = run_entrypoint(
+        {
+            "INPUT_GITHUB_TOKEN": "ghp_test",
+            "INPUT_REPOSITORY": "o/r",
+            "INPUT_PR_NUMBER": "42",
+            "INPUT_API_FORMAT": "  chat_completions  ",
+        }
+    )
+    assert result.returncode == 0, result.stderr
+    argv = (stub_bin / "argv").read_text().strip()
+    assert argv == "review --repo o/r --pr 42 --api-format chat_completions"
+
+
+def test_empty_api_format_is_not_forwarded(stub_bin):
+    """An empty or whitespace-only api_format adds no flag at all."""
+    for value in ("", "   "):
+        result = run_entrypoint(
+            {
+                "INPUT_GITHUB_TOKEN": "ghp_test",
+                "INPUT_REPOSITORY": "o/r",
+                "INPUT_PR_NUMBER": "42",
+                "INPUT_API_FORMAT": value,
+            }
+        )
+        assert result.returncode == 0, result.stderr
+        assert (stub_bin / "argv").read_text().strip() == "review --repo o/r --pr 42"
