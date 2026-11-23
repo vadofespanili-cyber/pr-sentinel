@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import urllib.parse
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 from .findings import SEVERITIES
@@ -55,6 +56,10 @@ class Config:
     api_format: str = "responses"
     instructions: str | None = None
     instructions_file: str | None = None
+    # Directory ``instructions_file`` is resolved against. Set by
+    # load_config()/parse_config_text() from the config file's location;
+    # None means "the working directory". Never a YAML key.
+    config_dir: str | None = None
 
     def __post_init__(self) -> None:
         # Normalize the gate: case- and whitespace-insensitive, and
@@ -118,14 +123,15 @@ class Config:
                     "instructions_file must be a string, "
                     f"got {self.instructions_file!r}"
                 )
-            if not os.path.isfile(self.instructions_file):
+            resolved = _resolve_instructions_path(self)
+            if not os.path.isfile(resolved):
                 raise ConfigError(
                     f"instructions_file not found: {self.instructions_file!r}"
                 )
             try:
-                with open(self.instructions_file, encoding="utf-8") as handle:
+                with open(resolved, encoding="utf-8") as handle:
                     file_text = handle.read()
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
                 raise ConfigError(
                     "instructions_file is not readable: "
                     f"{self.instructions_file!r} ({exc})"
@@ -167,6 +173,29 @@ def default_config() -> Config:
     return Config()
 
 
+def _resolve_instructions_path(config: Config) -> str:
+    """Resolve ``instructions_file`` inside the config file's directory.
+
+    The value must be a relative path that stays inside the directory
+    holding the config file (or the working directory when the config
+    was built without a file). Absolute paths and ``..`` escapes raise
+    :class:`ConfigError`: a PR author must not be able to make the
+    reviewer read arbitrary files such as ``/etc/passwd``.
+    """
+    value = config.instructions_file
+    if not isinstance(value, str):
+        raise ConfigError(f"instructions_file must be a string, got {value!r}")
+    raw = Path(value)
+    if raw.is_absolute():
+        raise ConfigError(f"instructions_file must be a relative path, got {value!r}")
+    base = Path(config.config_dir) if config.config_dir else Path.cwd()
+    base_resolved = base.resolve()
+    resolved = (base_resolved / raw).resolve()
+    if not resolved.is_relative_to(base_resolved):
+        raise ConfigError(f"instructions_file escapes the config directory: {value!r}")
+    return str(resolved)
+
+
 def resolve_instructions(config: Config) -> str | None:
     """The effective repo instructions for the reviewer prompt.
 
@@ -174,13 +203,15 @@ def resolve_instructions(config: Config) -> str | None:
     are set (the file is the richer source). Returns None when neither
     is set. Raises :class:`ConfigError` when the file cannot be read —
     :meth:`Config.validate` already checks it exists and fits the cap,
-    so this only fires on a race (deleted between load and review).
+    so this only fires on a race (deleted between load and review) or
+    on undecodable bytes.
     """
     if config.instructions_file is not None:
+        resolved = _resolve_instructions_path(config)
         try:
-            with open(config.instructions_file, encoding="utf-8") as handle:
+            with open(resolved, encoding="utf-8") as handle:
                 return handle.read()
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise ConfigError(
                 "instructions_file is not readable: "
                 f"{config.instructions_file!r} ({exc})"
@@ -205,10 +236,12 @@ def load_config(path: str | None = None) -> Config:
     if not os.path.isfile(path):
         raise ConfigError(f"config file not found: {path}")
     with open(path, encoding="utf-8") as handle:
-        return parse_config_text(handle.read())
+        return parse_config_text(
+            handle.read(), base_dir=os.path.dirname(os.path.abspath(path))
+        )
 
 
-def parse_config_text(text: str) -> Config:
+def parse_config_text(text: str, base_dir: str | None = None) -> Config:
     data = parse_yaml_subset(text)
     if data is None:
         return default_config()
@@ -218,6 +251,7 @@ def parse_config_text(text: str) -> Config:
     if unknown:
         raise ConfigError(f"unknown config keys: {sorted(unknown)}")
     config = Config(**data)
+    config.config_dir = base_dir
     config.validate()
     return config
 
