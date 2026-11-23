@@ -51,6 +51,39 @@ All notable changes to pr-sentinel are documented here. The format follows
   ordering: the lockfile set compared a lowercased basename against
   a mixed-case entry, so `Cargo.lock` landed in the core-source tier
   instead of the lowest tier.
+- **`instructions_file` path traversal (external review).**
+  `instructions_file` must now be a relative path that stays inside
+  the config file's directory (absolute paths and `..` escapes are
+  config errors), and undecodable bytes are a config error instead of
+  crashing the review.
+- **GraphQL bot-ownership check (external review).** In GitHub Actions
+  the author login is `github-actions` (no `[bot]` suffix) and
+  `GET /user` fails with 403 on `GITHUB_TOKEN`, so auto-resolving our
+  own threads never matched. The query now fetches
+  `author { __typename login }` and a thread counts as ours when its
+  root comment (`nodes[0]`) carries the inline marker and its author
+  is a `Bot` (or the token user, or a `[bot]` login).
+- **PR-author prompt injection via repo `instructions` (external
+  review).** Guidelines no longer go into the system prompt: they are
+  placed in the user message as lower-priority style/focus
+  preferences, and the system prompt states explicitly that they can
+  never override the core security rules, the JSON output schema, or
+  instruct the reviewer to suppress or ignore findings. The README
+  advises repos with untrusted external PRs to load config from the
+  base branch or a trusted `--config` path.
+- **Inline deduplication now runs before `max_inline_comments`
+  (external review).** Previously posted findings no longer crowd out
+  new findings on re-pushes.
+- **Static-check suppression and placeholder matching tightened
+  (external review).** `pr-sentinel: ignore` inside a quoted string
+  literal no longer suppresses a finding, and placeholder matching is
+  now exact-component / word-plus-digits — real words like `contest`,
+  `protest` and `latest` are reported again, while genuine fixtures
+  (`ghp_test`, `test123`, the AWS docs example key) stay suppressed.
+- **List-shaped `content` in `chat_completions` (external review).**
+  Providers that return `message.content` as a list of content blocks
+  (`[{"type": "text", "text": "..."}]`) now have their text blocks
+  joined instead of the reply being dropped as "no output text".
 
 ### Changed
 
