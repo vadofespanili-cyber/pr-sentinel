@@ -8,6 +8,7 @@ from pr_sentinel.config import (
     api_key_from_env,
     load_config,
     parse_config_text,
+    resolve_instructions,
 )
 
 
@@ -205,3 +206,104 @@ def test_fail_on_severity_invalid_value():
         parse_config_text("fail_on_severity: urgent\n")
     with pytest.raises(ConfigError, match="fail_on_severity"):
         parse_config_text("fail_on_severity: 3\n")
+
+
+# --- api_format (v0.3.0) ---------------------------------------------------
+
+
+def test_api_format_default_is_responses():
+    assert Config().api_format == "responses"
+    assert parse_config_text("").api_format == "responses"
+
+
+def test_api_format_valid_values_are_normalized():
+    assert (
+        parse_config_text("api_format: chat_completions\n").api_format
+        == "chat_completions"
+    )
+    assert (
+        parse_config_text("api_format: Chat_Completions\n").api_format
+        == "chat_completions"
+    )
+    assert Config(api_format=" RESPONSES ").api_format == "responses"
+
+
+def test_api_format_invalid_value():
+    with pytest.raises(ConfigError, match="api_format"):
+        parse_config_text("api_format: rest\n")
+    with pytest.raises(ConfigError, match="api_format"):
+        parse_config_text("api_format: ''\n")
+
+
+def test_api_format_wrong_type_is_rejected():
+    config = Config(api_format=3)
+    with pytest.raises(ConfigError, match="api_format"):
+        config.validate()
+
+
+# --- instructions / instructions_file (v0.3.0) ------------------------------
+
+
+def test_instructions_defaults_are_none():
+    assert Config().instructions is None
+    assert Config().instructions_file is None
+    assert resolve_instructions(Config()) is None
+
+
+def test_instructions_inline():
+    config = parse_config_text('instructions: "Focus on security."\n')
+    assert config.instructions == "Focus on security."
+    assert resolve_instructions(config) == "Focus on security."
+
+
+def test_instructions_blank_string_is_none():
+    assert parse_config_text("instructions: ''\n").instructions is None
+    assert Config(instructions="   ").instructions is None
+
+
+def test_instructions_file(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("Never suggest tabs.\n", encoding="utf-8")
+    config_path = tmp_path / ".pr-sentinel.yml"
+    config_path.write_text(f"instructions_file: {rules}\n", encoding="utf-8")
+    config = load_config(str(config_path))
+    assert resolve_instructions(config) == "Never suggest tabs.\n"
+
+
+def test_instructions_file_wins_over_inline(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("File wins.\n", encoding="utf-8")
+    config = parse_config_text(f"instructions: Inline.\ninstructions_file: {rules}\n")
+    assert resolve_instructions(config) == "File wins.\n"
+
+
+def test_instructions_file_missing_raises(tmp_path):
+    config = Config(instructions_file=str(tmp_path / "no-such-rules.md"))
+    with pytest.raises(ConfigError, match="instructions_file not found"):
+        config.validate()
+
+
+def test_instructions_file_deleted_after_load_raises(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("Gone soon.\n", encoding="utf-8")
+    config = Config(instructions_file=str(rules))
+    config.validate()
+    rules.unlink()
+    with pytest.raises(ConfigError, match="not readable"):
+        resolve_instructions(config)
+
+
+def test_instructions_over_cap_raises():
+    config = Config(instructions="x" * 4001)
+    with pytest.raises(ConfigError, match="4000"):
+        config.validate()
+    # Exactly at the cap is fine.
+    Config(instructions="x" * 4000).validate()
+
+
+def test_instructions_file_over_cap_raises(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * 4001, encoding="utf-8")
+    config = Config(instructions_file=str(rules))
+    with pytest.raises(ConfigError, match="4000"):
+        config.validate()
