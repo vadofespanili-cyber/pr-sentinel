@@ -28,16 +28,53 @@ from .findings import Finding
 
 # An inline suppression marker, inside a comment on the same added line:
 # "# pr-sentinel: ignore", "// pr-sentinel: ignore" or
-# "/* pr-sentinel: ignore */". Case-insensitive. The marker must follow
-# a comment opener so a string literal containing the words does not
-# suppress anything by accident.
+# "/* pr-sentinel: ignore */". Case-insensitive. The marker is checked
+# after string literals are stripped (see _strip_string_literals), so
+# the same words inside a quoted string do not suppress anything.
 _IGNORE_MARKER = re.compile(r"(?i)(?:#|//|/\*).*pr-sentinel:\s*ignore")
+
+
+def _strip_string_literals(line: str) -> str:
+    """Blank out quoted string literals on one line.
+
+    A ``# pr-sentinel: ignore`` inside a string (``x = "# ..."; eval(u)``)
+    is not a comment marker. A quote only starts a string when a matching
+    closing quote exists later on the line, so an apostrophe in a comment
+    (``# don't ...``) does not swallow the marker. Unterminated quotes
+    are left alone.
+    """
+    chars = list(line)
+    index = 0
+    while index < len(chars):
+        quote = chars[index]
+        if quote not in ("'", '"'):
+            index += 1
+            continue
+        closing = index + 1
+        while closing < len(chars):
+            if chars[closing] == "\\":
+                closing += 2
+                continue
+            if chars[closing] == quote:
+                break
+            closing += 1
+        if closing >= len(chars):
+            # No closing quote on this line: an apostrophe in a comment,
+            # not a string literal.
+            index += 1
+            continue
+        for pos in range(index, closing + 1):
+            chars[pos] = " "
+        index = closing + 1
+    return "".join(chars)
+
 
 # Words that mark a matched secret value as an obvious placeholder —
 # but only as a whole component of the value (split on non-alphanumeric
-# characters) or as its suffix: "ghp_test" is a fixture, while
-# "sk-fake1234567890abcdefghij" is a realistic key that must still
-# fire, so a mere substring is not enough.
+# characters), or as one placeholder word repeated, optionally followed
+# by digits: "ghp_test" is a fixture, and so are "test123" and
+# "testtest". A mere suffix is NOT enough: real words like "contest",
+# "protest" and "latest" end in "test" but are not placeholders.
 _PLACEHOLDER_WORDS = (
     "test",
     "dummy",
@@ -47,6 +84,13 @@ _PLACEHOLDER_WORDS = (
     "placeholder",
     "changeme",
 )
+# A component that is one placeholder word repeated, optionally
+# followed by digits ("test", "testtest", "test123", "dummy99").
+_PLACEHOLDER_REPEATED = re.compile(r"^(?:" + "|".join(_PLACEHOLDER_WORDS) + r")+\d*$")
+# Well-known published example values (not real credentials): the AWS
+# documentation example key. Kept explicit instead of a suffix rule so
+# real words ending in a placeholder word are not suppressed.
+_KNOWN_EXAMPLE_VALUES = frozenset({"akiaiosfodnn7example"})
 # "your_..." values ("your_api_key_here") are placeholders too.
 _PLACEHOLDER_SUBSTRING = "your_"
 
@@ -81,22 +125,25 @@ def shannon_entropy(value: str) -> float:
 def _looks_like_placeholder(token: str) -> bool:
     """True for obvious dummy secret values; never True for real secrets.
 
-    A value is a placeholder when a component of it is a placeholder
-    word (``ghp_test``), it ends with one (the AWS example key
-    ``AKIAIOSFODNN7EXAMPLE``), it contains ``your_``, or it is both
-    short and very low-entropy (``xxxx`` has entropy 0.0). A
-    random-looking token of real length is never caught: its entropy is
-    far above the threshold and its length is above the cap.
+    A value is a placeholder when it is a well-known published example
+    value, it contains ``your_``, one of its components is a placeholder
+    word (``ghp_test``) or a placeholder word repeated, optionally
+    followed by digits (``test123``, ``testtest``), or it is both short
+    and very low-entropy (``xxxx`` has entropy 0.0). A random-looking
+    token of real length is never caught: its entropy is far above the
+    threshold and its length is above the cap. Real words that merely
+    end in a placeholder word (``contest``, ``protest``, ``latest``)
+    are not placeholders and still fire.
     """
     lowered = token.lower()
+    if lowered in _KNOWN_EXAMPLE_VALUES:
+        return True
     if _PLACEHOLDER_SUBSTRING in lowered:
         return True
     for part in _COMPONENTS.split(lowered):
         if not part:
             continue
-        if part in _PLACEHOLDER_WORDS:
-            return True
-        if any(part.endswith(word) for word in _PLACEHOLDER_WORDS):
+        if part in _PLACEHOLDER_WORDS or _PLACEHOLDER_REPEATED.match(part):
             return True
     return len(token) < _PLACEHOLDER_MAX_LEN and (
         shannon_entropy(token) < _PLACEHOLDER_MAX_ENTROPY
@@ -255,10 +302,12 @@ def run_static_checks(
             for line in hunk.lines:
                 if line.kind != "add":
                     continue
-                if _IGNORE_MARKER.search(line.text):
+                if _IGNORE_MARKER.search(_strip_string_literals(line.text)):
                     # Inline suppression: an intentional fixture (e.g.
                     # eval() in tests) opts out of static findings on
-                    # this exact line only.
+                    # this exact line only. String literals are stripped
+                    # first, so the marker words inside a quoted string
+                    # do not suppress anything.
                     continue
                 findings.extend(_check_line(diff_file.path, line.new_no, line.text))
         if diff_file.added_lines > max_added_lines:
