@@ -3,6 +3,28 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.4] - 2026-11-23
+
+### Added
+
+- **`mypy --strict` now runs in CI.** The CI job installs `mypy` and
+  type-checks `src` on every push and pull request, so a type
+  regression can no longer slip through unnoticed (previously CI ran
+  only pytest, ruff and the CLI smoke test, while `mypy --strict` was
+  only run locally). The check is `python -m mypy --strict src`;
+  tests are not covered — they are not strict-clean.
+
+### Changed
+
+- **README naming clarified.** The top of the README now states the
+  three names plainly: repository and CLI command `pr-sentinel`,
+  PyPI package `pr-sentinel-ai`, GitHub Marketplace action
+  `ai-pr-sentinel`.
+- **README Limitations wording fixed.** The "English prompts" item no
+  longer says "in v0.1.0" (stale — prompts are still in English).
+- The example workflow (`examples/github-workflow.yml`) and the README
+  usage examples now pin `@v0.2.4`.
+
 ## [0.2.3] - 2026-11-23
 
 ### Changed
