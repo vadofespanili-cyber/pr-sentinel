@@ -1548,7 +1548,9 @@ def test_review_diff_instructions_file_reaches_model(
     rules.write_text("Never flag test files.\n", encoding="utf-8")
     patch = tmp_path / "sample.patch"
     patch.write_text(SAMPLE_DIFF, encoding="utf-8")
-    config = _write_config(tmp_path, model_server, f"instructions_file: {rules}\n")
+    config = _write_config(
+        tmp_path, model_server, "instructions_file: review-rules.md\n"
+    )
 
     code = main(["review-diff", "--file", str(patch), "--config", str(config)])
     assert code == 0
@@ -1749,6 +1751,73 @@ def test_post_review_ignores_unmarked_thread():
     files = parse_diff(SAMPLE_DIFF)
     _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
     assert client.resolved == []
+
+
+def _own_thread_github_actions(thread_id="T1", path="src/a.py", line=2):
+    """A thread as GitHub GraphQL returns it in Actions: the author
+    login is "github-actions" (no "[bot]" suffix) with __typename Bot."""
+    thread = _own_thread(thread_id, path, line)
+    thread["comments"]["nodes"][0]["author"] = {
+        "__typename": "Bot",
+        "login": "github-actions",
+    }
+    return thread
+
+
+def test_post_review_resolves_github_actions_thread_when_user_lookup_403():
+    """In GitHub Actions GET /user fails with 403 on GITHUB_TOKEN, so
+    ``me`` is None — the thread is still ours via author __typename."""
+
+    class _ForbiddenUserClient(_StubClient):
+        def get_authenticated_user(self):
+            raise GitHubError("403 Forbidden", status=403)
+
+    client = _ForbiddenUserClient()
+    client.threads = [_own_thread_github_actions()]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
+    assert client.resolved == ["T1"]
+
+
+def test_post_review_only_inspects_thread_root_comment():
+    """Only nodes[0] counts: a human root comment with our marker in a
+    later reply is not our thread."""
+    client = _StubClient()
+    thread = _own_thread()
+    thread["comments"]["nodes"] = [
+        {
+            "body": "A human opened this thread.",
+            "author": {"login": "someone-else"},
+        },
+        thread["comments"]["nodes"][0],
+    ]
+    client.threads = [thread]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
+    assert client.resolved == []
+
+
+def test_post_review_dedupes_before_max_inline_comments():
+    """Dedup runs before the max_inline_comments cut: a previously
+    posted finding must not crowd out a new finding on re-pushes."""
+    client = _StubClient()
+    files = parse_diff(SAMPLE_DIFF)
+    first = [Finding("high", "bug", "src/a.py", 2, "Line finding.")]
+    _post_review(client, "o", "r", 1, Config(), "Summary.", first, files)
+    assert len(client.reviews) == 1
+    posted_body = client.reviews[0][1][0]["body"]
+    client.review_comments = [_own_inline_comment(posted_body)]
+    both = [
+        Finding("high", "bug", "src/a.py", 2, "Line finding."),
+        Finding("high", "bug", "src/a.py", 3, "Other finding."),
+    ]
+    _post_review(
+        client, "o", "r", 1, Config(max_inline_comments=1), "Summary.", both, files
+    )
+    assert len(client.reviews) == 2
+    assert len(client.reviews[1][1]) == 1
+    assert client.reviews[1][1][0]["line"] == 3
+    assert "Other finding." in client.reviews[1][1][0]["body"]
 
 
 def test_post_review_resolve_listing_failure_warns_but_succeeds(capsys):
