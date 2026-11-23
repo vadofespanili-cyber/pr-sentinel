@@ -1,6 +1,6 @@
 # Publishing pr-sentinel
 
-Status as of 2026-11-23, v0.2.2. Two destinations: **PyPI** and the
+Status as of 2026-11-23, v0.2.3. Two destinations: **PyPI** and the
 **GitHub Marketplace**. Nothing in this document uploads anything — it is
 the checklist for the first publish. The workflow file
 `.github/workflows/publish.yml` is prepared locally and not yet pushed.
@@ -26,21 +26,30 @@ returns 404): `pr-sentinel-ai`, `pr-sentinel-bot`, `github-pr-sentinel`,
 `pr-sentinel-review`, `ai-pr-sentinel`, `prsentinel`. No Marketplace
 action named "pr-sentinel-ai" turned up in search either — but that is
 not proof; GitHub enforces uniqueness at publish time and will reject a
-duplicate name then.
+duplicate name then. That is exactly what happened: when v0.2.2 was
+submitted to the Marketplace, GitHub rejected the name
+`pr-sentinel-ai` — not because of an existing action, but because an
+**organization named `pr-sentinel-ai` already exists**
+(`api.github.com/users/pr-sentinel-ai` → type Organization, 0 public
+repos). GitHub requires action names to be unique across actions, users
+and organizations, so the `pr-sentinel-ai` action name can never be
+listed.
 
-**Decision (2026-11-23, Jalal): the new name is `pr-sentinel-ai`** for
-both the PyPI distribution name and the `action.yml` name. The
-`pr-sentinel` console command stays as it is — the command name is
-independent of the distribution name. v0.2.2 is the first release
-under the new name, and the rename ships in its own PR before any
-publish.
+**Decision (2026-11-23, Jalal): the PyPI distribution name stays
+`pr-sentinel-ai`, and the Marketplace action name is now
+`ai-pr-sentinel`** (verified free on GitHub and on the Marketplace —
+both 404 — before the v0.2.3 release). The `pr-sentinel` console
+command stays as it is — the command name is independent of the
+distribution name. v0.2.3 is the first release carrying the listable
+action name, and the rename ships in its own PR before any publish.
+v0.2.2 carries the blocked name and cannot be listed.
 
 ## 1. PyPI — current status
 
 | Item | Status |
 |---|---|
-| `pyproject.toml` metadata (build backend, version 0.2.2, description, readme, license, requires-python, classifiers, authors, URLs, keywords, entry point) | Ready — fixed in this prep (see §4) |
-| Distribution name | **`pr-sentinel-ai`** — renamed in v0.2.2 (this PR) |
+| `pyproject.toml` metadata (build backend, version 0.2.3, description, readme, license, requires-python, classifiers, authors, URLs, keywords, entry point) | Ready — fixed in this prep (see §4) |
+| Distribution name | **`pr-sentinel-ai`** — renamed in v0.2.2 |
 | Local build | Works — see §2 |
 | `twine check` | PASSED for wheel and sdist |
 | `.github/workflows/publish.yml` | Prepared locally (release trigger, Trusted Publishing); **not pushed** |
@@ -56,10 +65,11 @@ publish.
 .venv/bin/twine check dist/*
 ```
 
-Artifacts (rebuilt from v0.2.2, after the rename to `pr-sentinel-ai`):
+Artifacts (rebuilt from v0.2.3, after the Marketplace action rename to
+`ai-pr-sentinel` — the distribution name is unchanged):
 
-- `dist/pr_sentinel_ai-0.2.2-py3-none-any.whl` (35,342 bytes)
-- `dist/pr_sentinel_ai-0.2.2.tar.gz` (35,901 bytes)
+- `dist/pr_sentinel_ai-0.2.3-py3-none-any.whl` (35,344 bytes)
+- `dist/pr_sentinel_ai-0.2.3.tar.gz` (35,894 bytes)
 
 `twine check` PASSED for both. Wheel contents: only the `pr_sentinel`
 package plus `dist-info` (including `LICENSE`, entry point, METADATA).
@@ -97,9 +107,10 @@ screenshots, or keys in either artifact.
 
 ## 4. PyPI — what Muse does
 
-- Rename PR (this PR): ships the rename to `pr-sentinel-ai` as
-  v0.2.2 (`pyproject.toml` name, `action.yml` name, README/docs
-  mentions, install command).
+- Rename PR (v0.2.3): ships the Marketplace action rename to
+  `ai-pr-sentinel` (`action.yml` name only; the PyPI distribution name
+  stays `pr-sentinel-ai`, as do the README/docs mentions and the
+  install command).
 - Push `.github/workflows/publish.yml` (workflow files go through the
   GitHub web UI — the App token cannot write them) and the rename PR;
   merge, tag, release as usual.
@@ -128,7 +139,7 @@ screenshots, or keys in either artifact.
 
 ### Still open (not a metadata fix)
 
-- The distribution name is now `pr-sentinel-ai` (v0.2.2, this PR).
+- The distribution name is now `pr-sentinel-ai` (v0.2.2).
 - The README install command is now `pip install pr-sentinel-ai`
   (this PR) — add the PyPI version badge after the first PyPI upload.
 
@@ -137,17 +148,18 @@ screenshots, or keys in either artifact.
 | Item | Status |
 |---|---|
 | `action.yml`: name, description (31 chars; limit 125), author, `runs.docker` + `Dockerfile`, branding `eye` / `blue` | Valid |
-| Repository public, tagged releases (v0.2.2 latest), action already used by the self-review workflow | Ready |
-| Action name | **`pr-sentinel-ai`** — renamed in v0.2.2 (this PR) |
-| Marketplace Developer Agreement accepted | **Missing** — Jalal, at publish time (§6) |
-| GitHub 2FA on Jalal's account | **Required** — publishing requires it (§6) |
+| Repository public, tagged releases (v0.2.3 latest), action already used by the self-review workflow | Ready |
+| Action name | **`ai-pr-sentinel`** — renamed in v0.2.3 (this PR); `pr-sentinel-ai` is blocked by an existing organization of that name |
+| Marketplace Developer Agreement accepted | **Accepted** — during the v0.2.2 listing attempt (§6) |
+| GitHub 2FA on Jalal's account | **Enabled 2026-11-23** — authenticator app (§6) |
 
 **Key finding: a release can be listed by editing it — no new release
 is needed for the listing itself.** The release edit page has a
 "Publish this Action to the GitHub Marketplace" checkbox. But it must
-be checked on a release carrying the new name — v0.2.2, not v0.2.1
-(v0.2.1's `action.yml` still says `pr-sentinel`, so listing that tag
-would publish the old, conflicting name). Sources: GitHub Docs,
+be checked on a release carrying the listable name — v0.2.3, not
+v0.2.2 (v0.2.2's `action.yml` says `pr-sentinel-ai`, which GitHub
+rejects because an organization of that name exists; v0.2.1's says
+`pr-sentinel`, which collides with the existing "PR Sentinel" action). Sources: GitHub Docs,
 "Publishing actions in GitHub Marketplace"
 (<https://docs.github.com/en/actions/how-tos/sharing-automations/creating-actions/publishing-actions-in-github-marketplace>),
 and community write-ups confirming the edit-release path.
@@ -165,30 +177,34 @@ After the rename has been released (a tagged release carrying the new
 
 1. Releases → open the release → **Edit release**.
 2. Check **Publish this Action to the GitHub Marketplace**.
-3. Accept the **GitHub Marketplace Developer Agreement** (first time
-   only; the checkbox is disabled until it is accepted).
+3. The **GitHub Marketplace Developer Agreement** was already
+   accepted during the v0.2.2 listing attempt — it should not appear
+   again (if it does, accept it; first time only, and the checkbox is
+   disabled until it is accepted).
 4. Pick the **Primary category** (suggested: Continuous integration)
    and optionally a secondary category.
 5. Click **Update release**. The action appears at
-   `github.com/marketplace/actions/<slug>` within minutes.
-6. GitHub 2FA must be enabled on the publishing account — publishing
-   requires it.
+   `github.com/marketplace/actions/ai-pr-sentinel` within minutes.
+6. GitHub 2FA must be enabled on the publishing account — enabled
+   2026-11-23 (authenticator app), so this is already satisfied.
 
 (Muse) After it is live: add the Marketplace badge to the README.
 
 ## 7. What is needed from Jalal (summary)
 
-- [x] New name picked: `pr-sentinel-ai` (2026-11-23); the
-  `pr-sentinel` console command stays as it is.
+- [x] Names picked (2026-11-23): PyPI distribution `pr-sentinel-ai`;
+  Marketplace action `ai-pr-sentinel` (after `pr-sentinel-ai` was
+  rejected at publish time — an organization of that name exists).
+  The `pr-sentinel` console command stays as it is.
 - [ ] PyPI account + verified email + 2FA enabled.
 - [ ] Add the PyPI Trusted Publisher (pending publisher) for
   `pr-sentinel-ai` — needs his PyPI login; Muse can walk him through it.
 - [ ] Create the `pypi` GitHub environment (or approve Muse doing it
   via the browser).
-- [ ] GitHub 2FA enabled (needed to publish to the Marketplace) +
-  accept the Marketplace Developer Agreement at publish time.
-- [ ] (Marketplace) Check the "Publish this Action" box on the release
-  (browser, ~2 min) — or let Muse do it via the browser.
+- [x] GitHub 2FA enabled 2026-11-23 (authenticator app) + Marketplace
+  Developer Agreement accepted.
+- [ ] (Marketplace) Check the "Publish this Action" box on the v0.2.3
+  release (browser, ~2 min) — or let Muse do it via the browser.
 
 ## Sources
 
