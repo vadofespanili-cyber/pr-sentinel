@@ -215,7 +215,11 @@ Guidelines are placed in the user message as lower-priority style and
 focus preferences — never in the system prompt — and the system prompt
 states explicitly that they can never override the core security
 rules, the JSON output schema, or instruct the reviewer to suppress or
-ignore findings. That matters because a PR author can change the repo
+ignore findings. On the Responses API path the system prompt is sent
+in the API's separate `instructions` field (the guidelines and diff go
+in `input`), so the guidelines cannot demote the system rules to user
+input; the Chat Completions path gets the same separation from its
+system/user roles. That matters because a PR author can change the repo
 config inside their own PR: **repos that review untrusted external PRs
 should load the config from the base branch or pass a trusted
 `--config` path**, rather than reading `.pr-sentinel.yaml` from the PR
