@@ -17,6 +17,7 @@ from pr_sentinel.cli import _post_review, _prepare_review, main
 from pr_sentinel.config import Config
 from pr_sentinel.diff import parse_diff
 from pr_sentinel.findings import Finding
+from pr_sentinel.github_client import GitHubError
 from pr_sentinel.reporter import SUMMARY_MARKER
 
 SAMPLE_DIFF = (
@@ -119,6 +120,15 @@ class FakeModelHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b""
         FakeModelHandler.requests.append({"path": self.path, "body": raw})
+        if self.path.endswith("/chat/completions"):
+            # Chat Completions reply: the model text is in
+            # choices[0].message.content.
+            _send_json(
+                self,
+                200,
+                {"choices": [{"message": {"content": json.dumps([MODEL_FINDING])}}]},
+            )
+            return
         # Responses API reply: the model text is the JSON array of findings.
         _send_json(
             self,
@@ -603,13 +613,13 @@ def test_prepare_review_ignores_files_before_max_files(monkeypatch, capsys):
         "+++ b/vendor/v.py\n"
         "@@ -1,1 +1,2 @@\n"
         " x = 1\n"
-        "+eval(v)\n"
+        "+eval(v)\n"  # pr-sentinel: ignore
         "diff --git a/src/a.py b/src/a.py\n"
         "--- a/src/a.py\n"
         "+++ b/src/a.py\n"
         "@@ -1,1 +1,2 @@\n"
         " y = 1\n"
-        "+eval(a)\n"
+        "+eval(a)\n"  # pr-sentinel: ignore
     )
     config = Config(ignore_paths=["vendor/**"], max_files=1, severity_threshold="low")
     _summary, findings, files = _prepare_review(config, diff)
@@ -630,10 +640,10 @@ def test_prepare_review_drops_whole_trailing_files_over_size_limit(monkeypatch, 
         "+++ b/one.py\n"
         "@@ -1,1 +1,2 @@\n"
         " a = 1\n"
-        "+eval(one)\n"
+        "+eval(one)\n"  # pr-sentinel: ignore
         "@@ -10,1 +11,2 @@\n"
         " b = 1\n"
-        "+eval(two)\n"
+        "+eval(two)\n"  # pr-sentinel: ignore
     )
     second = (
         "diff --git a/two.py b/two.py\n"
@@ -641,7 +651,7 @@ def test_prepare_review_drops_whole_trailing_files_over_size_limit(monkeypatch, 
         "+++ b/two.py\n"
         "@@ -1,1 +1,2 @@\n"
         " c = 1\n"
-        "+eval(three)\n"
+        "+eval(three)\n"  # pr-sentinel: ignore
     )
     files = parse_diff(first + second)
     budget = len(files[0].render_patch()) + 5  # first file fits, both do not
@@ -700,7 +710,7 @@ def test_review_diff_static_only_summary_names_static_checks(
         "+++ b/a.py\n"
         "@@ -1,1 +1,2 @@\n"
         " x = 1\n"
-        "+eval(user_input)\n",
+        "+eval(user_input)\n",  # pr-sentinel: ignore
         encoding="utf-8",
     )
     assert main(["review-diff", "--file", str(patch)]) == 0
@@ -717,7 +727,7 @@ EVAL_PATCH = (
     "+++ b/a.py\n"
     "@@ -1,1 +1,2 @@\n"
     " x = 1\n"
-    "+eval(user_input)\n"
+    "+eval(user_input)\n"  # pr-sentinel: ignore
 )
 
 
@@ -1119,12 +1129,25 @@ class _StubClient:
         self.updated: list[tuple[int, str]] = []
         self.reviews: list[tuple[str, list]] = []
         self.listed_comments: list[dict] = []
+        self.review_comments: list[dict] = []
+        self.threads: list[dict] = []
+        self.resolved: list[str] = []
 
     def get_authenticated_user(self) -> dict:
         return {"login": self.authenticated_login, "type": "Bot"}
 
     def list_issue_comments(self, owner, repo, number):
         return self.listed_comments
+
+    def list_pull_review_comments(self, owner, repo, number):
+        return self.review_comments
+
+    def list_review_threads(self, owner, repo, number):
+        return self.threads
+
+    def resolve_review_thread(self, thread_id):
+        self.resolved.append(thread_id)
+        return {"id": thread_id, "isResolved": True}
 
     def create_issue_comment(self, owner, repo, number, body):
         self.created.append(body)
@@ -1436,3 +1459,343 @@ def test_review_sarif_out_written(
     results = parsed["runs"][0]["results"]
     # The reviewer always tags AI findings with the "ai-review" rule.
     assert any(r["ruleId"] == "ai-review" for r in results)
+
+
+# --- v0.3.0: api_format, instructions, risk sorting, inline lifecycle -------
+
+
+def test_review_diff_api_format_chat_completions_end_to_end(
+    tmp_path, monkeypatch, capsys, model_server
+):
+    """The chat_completions path works end to end against a fake
+    OpenAI-compatible server: the request goes to /chat/completions
+    with a messages array and the model's finding comes back."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    patch = tmp_path / "sample.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    config = _write_config(tmp_path, model_server, "api_format: chat_completions\n")
+
+    code = main(["review-diff", "--file", str(patch), "--config", str(config)])
+    assert code == 0
+    assert "Model finding." in capsys.readouterr().out
+    assert FakeModelHandler.requests[-1]["path"] == "/v1/chat/completions"
+    payload = json.loads(FakeModelHandler.requests[-1]["body"])
+    assert [m["role"] for m in payload["messages"]] == ["system", "user"]
+    assert "--- BEGIN DIFF (untrusted data) ---" in payload["messages"][1]["content"]
+
+
+def test_review_diff_api_format_flag_overrides_config(
+    tmp_path, monkeypatch, capsys, model_server
+):
+    """--api-format wins over the config file, and its value is
+    normalized (case-insensitive)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    patch = tmp_path / "sample.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    config = _write_config(tmp_path, model_server, "api_format: responses\n")
+
+    code = main(
+        [
+            "review-diff",
+            "--file",
+            str(patch),
+            "--config",
+            str(config),
+            "--api-format",
+            "CHAT_COMPLETIONS",
+        ]
+    )
+    assert code == 0
+    assert "Model finding." in capsys.readouterr().out
+    assert FakeModelHandler.requests[-1]["path"] == "/v1/chat/completions"
+
+
+def test_review_diff_invalid_api_format_flag_exits_2(
+    tmp_path, monkeypatch, capsys, model_server
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    patch = tmp_path / "sample.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    config = _write_config(tmp_path, model_server)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "review-diff",
+                "--file",
+                str(patch),
+                "--config",
+                str(config),
+                "--api-format",
+                "rest",
+            ]
+        )
+    assert excinfo.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_review_diff_instructions_file_reaches_model(
+    tmp_path, monkeypatch, capsys, model_server
+):
+    """Repo instructions from instructions_file are injected into the
+    prompt as repository guidelines, before the diff delimiters."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("Never flag test files.\n", encoding="utf-8")
+    patch = tmp_path / "sample.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    config = _write_config(tmp_path, model_server, f"instructions_file: {rules}\n")
+
+    code = main(["review-diff", "--file", str(patch), "--config", str(config)])
+    assert code == 0
+    payload = json.loads(FakeModelHandler.requests[-1]["body"])
+    prompt = payload["input"]
+    assert "Repository guidelines" in prompt
+    assert "Never flag test files." in prompt
+    assert prompt.index("Repository guidelines") < prompt.index(
+        "--- BEGIN DIFF (untrusted data) ---"
+    )
+
+
+def test_review_diff_missing_instructions_file_exits_2(
+    tmp_path, monkeypatch, capsys, model_server
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    patch = tmp_path / "sample.patch"
+    patch.write_text(SAMPLE_DIFF, encoding="utf-8")
+    config = _write_config(
+        tmp_path, model_server, "instructions_file: /definitely/not/here.md\n"
+    )
+
+    code = main(["review-diff", "--file", str(patch), "--config", str(config)])
+    assert code == 2
+    assert "instructions_file" in capsys.readouterr().err
+
+
+def _three_file_diff():
+    return (
+        "diff --git a/README.md b/README.md\n"
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,1 +1,2 @@\n"
+        " docs\n"
+        "+more docs\n"
+        "diff --git a/src/a.py b/src/a.py\n"
+        "--- a/src/a.py\n"
+        "+++ b/src/a.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        "+y = 2\n"
+        "diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\n"
+        "--- a/.github/workflows/ci.yml\n"
+        "+++ b/.github/workflows/ci.yml\n"
+        "@@ -1,1 +1,2 @@\n"
+        " jobs:\n"
+        "+  test: run\n"
+    )
+
+
+def test_prepare_review_risk_sorting_keeps_workflow_first_under_max_files(
+    monkeypatch, capsys
+):
+    """With max_files=1 the highest-risk file (the workflow) survives,
+    even though it is last in the diff."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    config = Config(max_files=1, severity_threshold="low")
+    _summary, _findings, files = _prepare_review(config, _three_file_diff())
+    assert [f.path for f in files] == [".github/workflows/ci.yml"]
+    assert "reviewing the first 1 of 3 files" in capsys.readouterr().err
+
+
+def test_prepare_review_risk_sorting_drops_docs_first_under_size_limit(
+    monkeypatch, capsys
+):
+    """Under max_diff_chars the lowest-risk files (docs) are dropped
+    before source and CI files."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    files = parse_diff(_three_file_diff())
+    by_path = {f.path: f for f in files}
+    budget = (
+        len(by_path[".github/workflows/ci.yml"].render_patch())
+        + len(by_path["src/a.py"].render_patch())
+        + 5
+    )
+    config = Config(max_diff_chars=budget, severity_threshold="low")
+    _summary, _findings, kept = _prepare_review(config, _three_file_diff())
+    assert [f.path for f in kept] == [".github/workflows/ci.yml", "src/a.py"]
+    assert "diff exceeds max_diff_chars" in capsys.readouterr().err
+
+
+def _line_finding():
+    return [Finding("high", "bug", "src/a.py", 2, "Line finding.")]
+
+
+def _own_inline_comment(body):
+    return {
+        "id": 5,
+        "path": "src/a.py",
+        "line": 2,
+        "body": body,
+        "user": {"login": "github-actions[bot]", "type": "Bot"},
+    }
+
+
+def _own_thread(thread_id="T1", path="src/a.py", line=2, resolved=False):
+    return {
+        "id": thread_id,
+        "isResolved": resolved,
+        "path": path,
+        "line": line,
+        "comments": {
+            "nodes": [
+                {
+                    "body": "**high · bug**\n\nOld finding.\n\n"
+                    "<!-- pr-sentinel:inline -->",
+                    "author": {"login": "github-actions[bot]"},
+                }
+            ]
+        },
+    }
+
+
+def test_post_review_dedupes_identical_inline_comment():
+    """A re-push with the same finding does not post the same inline
+    comment a second time."""
+    client = _StubClient()
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert len(client.reviews) == 1
+    posted_body = client.reviews[0][1][0]["body"]
+    client.review_comments = [_own_inline_comment(posted_body)]
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert len(client.reviews) == 1  # no second review posted
+
+
+def test_post_review_posts_changed_message_at_same_line():
+    """The same (path, line) with a different message is a new comment,
+    not a duplicate."""
+    client = _StubClient()
+    files = parse_diff(SAMPLE_DIFF)
+    client.review_comments = [
+        _own_inline_comment(
+            "**high · bug**\n\nOld message.\n\n<!-- pr-sentinel:inline -->"
+        )
+    ]
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert len(client.reviews) == 1
+    assert "Line finding." in client.reviews[0][1][0]["body"]
+
+
+def test_post_review_ignores_other_users_identical_comment():
+    """An identical comment from another user is not ours: it does not
+    suppress our own inline comment."""
+    client = _StubClient()
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    posted_body = client.reviews[0][1][0]["body"]
+    someone_elses = _own_inline_comment(posted_body)
+    someone_elses["user"] = {"login": "someone-else", "type": "User"}
+    client.review_comments = [someone_elses]
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert len(client.reviews) == 2
+
+
+def test_post_review_ignores_unmarked_identical_comment():
+    """A comment with the same text but without our hidden marker does
+    not count as a duplicate (it could be a human quoting us)."""
+    client = _StubClient()
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    posted_body = client.reviews[0][1][0]["body"]
+    unmarked = _own_inline_comment(
+        posted_body.replace("\n\n<!-- pr-sentinel:inline -->", "")
+    )
+    client.review_comments = [unmarked]
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert len(client.reviews) == 2
+
+
+def test_post_review_resolves_outdated_own_thread():
+    """A re-push with no findings resolves our own open thread, even
+    when there are no new inline comments to post."""
+    client = _StubClient()
+    client.threads = [_own_thread()]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
+    assert client.reviews == []
+    assert client.resolved == ["T1"]
+
+
+def test_post_review_keeps_thread_for_current_finding():
+    """A thread whose (path, line) is still flagged is left alone."""
+    client = _StubClient()
+    client.threads = [_own_thread()]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert client.resolved == []
+
+
+def test_post_review_ignores_unmarked_thread():
+    """A thread without our marker is not ours: never resolved."""
+    client = _StubClient()
+    thread = _own_thread()
+    thread["comments"]["nodes"][0]["body"] = "A human comment."
+    client.threads = [thread]
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
+    assert client.resolved == []
+
+
+def test_post_review_resolve_listing_failure_warns_but_succeeds(capsys):
+    """If GraphQL listing fails, the review still succeeds with a
+    warning instead of crashing."""
+
+    class _FailingThreadsClient(_StubClient):
+        def list_review_threads(self, owner, repo, number):
+            raise GitHubError("GraphQL is down")
+
+    client = _FailingThreadsClient()
+    files = parse_diff(SAMPLE_DIFF)
+    _post_review(client, "o", "r", 1, Config(), "Summary.", _line_finding(), files)
+    assert len(client.reviews) == 1
+    assert "could not list review threads" in capsys.readouterr().err
+
+
+def test_review_dry_run_touches_no_review_comments_or_threads(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    github_server,
+    model_server,
+    stub_dependencies,
+    point_github_client_at_fake_server,
+):
+    """--dry-run never lists review comments or calls GraphQL: it must
+    not mutate or resolve anything."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    monkeypatch.setenv("PR_SENTINEL_API_KEY", "fake-key")
+    config = _write_config(tmp_path, model_server)
+
+    code = main(
+        [
+            "review",
+            "--repo",
+            "o/r",
+            "--pr",
+            "1",
+            "--config",
+            str(config),
+            "--dry-run",
+        ]
+    )
+    assert code == 0
+    paths = [r["path"] for r in FakeGitHubHandler.requests]
+    assert not any("/pulls/1/comments" in p for p in paths)
+    assert not any(p == "/graphql" for p in paths)
+    assert _review_posted() == []
