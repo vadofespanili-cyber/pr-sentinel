@@ -24,6 +24,7 @@ on:
 jobs:
   publish:
     name: Build and publish to PyPI
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
