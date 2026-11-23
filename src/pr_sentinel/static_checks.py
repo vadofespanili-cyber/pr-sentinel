@@ -29,44 +29,105 @@ from .findings import Finding
 # An inline suppression marker, inside a comment on the same added line:
 # "# pr-sentinel: ignore", "// pr-sentinel: ignore" or
 # "/* pr-sentinel: ignore */". Case-insensitive. The marker is checked
-# after string literals are stripped (see _strip_string_literals), so
-# the same words inside a quoted string do not suppress anything.
+# after string literals are stripped (see _StringLiteralStripper), so
+# the same words inside a quoted string — including a multiline
+# triple-quoted string — do not suppress anything.
 _IGNORE_MARKER = re.compile(r"(?i)(?:#|//|/\*).*pr-sentinel:\s*ignore")
 
 
-def _strip_string_literals(line: str) -> str:
-    """Blank out quoted string literals on one line.
+class _StringLiteralStripper:
+    """Blank out string literals, tracking triple-quoted strings.
 
-    A ``# pr-sentinel: ignore`` inside a string (``x = "# ..."; eval(u)``)
-    is not a comment marker. A quote only starts a string when a matching
-    closing quote exists later on the line, so an apostrophe in a comment
-    (``# don't ...``) does not swallow the marker. Unterminated quotes
-    are left alone.
+    Stateful across the added lines of one file: a ``\"\"\"`` or
+    ``'''`` that opens on one line and closes on a later line keeps
+    the lines in between blanked, so a ``pr-sentinel: ignore`` inside
+    a multiline string is never mistaken for a comment marker. A
+    quote only starts a string when a matching closing quote exists
+    later on the line, so an apostrophe in a comment (``# don't ...``)
+    does not swallow the marker. A ``#`` outside any string starts a
+    comment, so a triple quote inside a comment never opens a string.
+    Only added lines are scanned: a triple-quoted string opened on a
+    context line is not tracked (the checks only ever see added
+    lines).
     """
-    chars = list(line)
-    index = 0
-    while index < len(chars):
-        quote = chars[index]
-        if quote not in ("'", '"'):
-            index += 1
-            continue
-        closing = index + 1
-        while closing < len(chars):
-            if chars[closing] == "\\":
-                closing += 2
+
+    def __init__(self) -> None:
+        # The triple-quote delimiter we are currently inside, if any.
+        self._triple: str | None = None
+
+    def strip(self, line: str) -> str:
+        chars = list(line)
+        self._strip(chars)
+        return "".join(chars)
+
+    def _strip(self, chars: list[str]) -> None:
+        index = 0
+        while index < len(chars):
+            if self._triple is not None:
+                closing = self._find_triple_close(chars, index, self._triple)
+                if closing is None:
+                    # Still inside the string at end of line: the
+                    # whole rest of the line is string content.
+                    for pos in range(index, len(chars)):
+                        chars[pos] = " "
+                    return
+                for pos in range(index, closing + 3):
+                    chars[pos] = " "
+                self._triple = None
+                index = closing + 3
                 continue
-            if chars[closing] == quote:
-                break
-            closing += 1
-        if closing >= len(chars):
-            # No closing quote on this line: an apostrophe in a comment,
-            # not a string literal.
+            char = chars[index]
+            if char == "#":
+                # The rest of the line is a comment: no string can
+                # open here, and the marker text (if any) stays
+                # visible so a real comment marker still suppresses.
+                return
+            if char not in ("'", '"'):
+                index += 1
+                continue
+            triple = char * 3
+            if "".join(chars[index : index + 3]) == triple:
+                closing = self._find_triple_close(chars, index + 3, triple)
+                if closing is None:
+                    # Opens here, closes on a later line.
+                    for pos in range(index, len(chars)):
+                        chars[pos] = " "
+                    self._triple = triple
+                    return
+                for pos in range(index, closing + 3):
+                    chars[pos] = " "
+                index = closing + 3
+                continue
+            closing = index + 1
+            while closing < len(chars):
+                if chars[closing] == "\\":
+                    closing += 2
+                    continue
+                if chars[closing] == char:
+                    break
+                closing += 1
+            if closing >= len(chars):
+                # No closing quote on this line: an apostrophe in a
+                # comment, not a string literal.
+                index += 1
+                continue
+            for pos in range(index, closing + 1):
+                chars[pos] = " "
+            index = closing + 1
+
+    @staticmethod
+    def _find_triple_close(chars: list[str], start: int, delimiter: str) -> int | None:
+        """Index where the closing triple quote starts, or None."""
+        index = start
+        while index <= len(chars) - 3:
+            if chars[index] == "\\":
+                # An escaped quote is not a closer.
+                index += 2
+                continue
+            if "".join(chars[index : index + 3]) == delimiter:
+                return index
             index += 1
-            continue
-        for pos in range(index, closing + 1):
-            chars[pos] = " "
-        index = closing + 1
-    return "".join(chars)
+        return None
 
 
 # Words that mark a matched secret value as an obvious placeholder —
@@ -298,15 +359,19 @@ def run_static_checks(
     """Run all static checks over the added lines of ``files``."""
     findings: list[Finding] = []
     for diff_file in files:
+        # One stripper per file: a triple-quoted string can span
+        # hunks, so the in-string state carries across them.
+        stripper = _StringLiteralStripper()
         for hunk in diff_file.hunks:
             for line in hunk.lines:
                 if line.kind != "add":
                     continue
-                if _IGNORE_MARKER.search(_strip_string_literals(line.text)):
+                if _IGNORE_MARKER.search(stripper.strip(line.text)):
                     # Inline suppression: an intentional fixture (e.g.
                     # eval() in tests) opts out of static findings on
                     # this exact line only. String literals are stripped
                     # first, so the marker words inside a quoted string
+                    # — including a multiline triple-quoted string —
                     # do not suppress anything.
                     continue
                 findings.extend(_check_line(diff_file.path, line.new_no, line.text))
