@@ -1,6 +1,7 @@
 # pr-sentinel
 
 [![CI](https://github.com/vadofespanili-cyber/pr-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/vadofespanili-cyber/pr-sentinel/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pr-sentinel-ai.svg)](https://pypi.org/project/pr-sentinel-ai/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -52,6 +53,10 @@ closes or changes code; it only comments, and the human always decides.
 - **Safe by default:** API keys come from environment variables only, never
   from config files or the command line. Secret values are never echoed in
   findings or logs.
+
+## It caught a real issue in its own workflow
+
+While reviewing its own PyPI publish-workflow PR ([#9](https://github.com/vadofespanili-cyber/pr-sentinel/pull/9)), pr-sentinel caught a real supply-chain issue: `workflow_dispatch` would have let a run from any branch publish that branch's package contents to PyPI (medium · security). It was fixed with a job-level condition (`if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'`) plus restricting the `pypi` environment's deployment branches to `main` and `v*` tags — and the bot's re-review of the fixed commit reported "No findings."
 
 ## Quick start — GitHub Action
 
