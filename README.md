@@ -80,7 +80,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.4
+      - uses: vadofespanili-cyber/pr-sentinel@v0.3.0
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
 ```
@@ -279,7 +279,7 @@ findings that were reported, so with the default threshold `medium` a
 show up in GitHub code scanning. Upload it in a later step:
 
 ```yaml
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.4
+      - uses: vadofespanili-cyber/pr-sentinel@v0.3.0
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
           sarif_out: pr-sentinel.sarif
@@ -406,9 +406,9 @@ design decisions.
 
 Versioned releases live on the
 [Releases page](https://github.com/vadofespanili-cyber/pr-sentinel/releases).
-The current release is **v0.2.4** — see the
+The current release is **v0.3.0** — see the
 [Changelog](CHANGELOG.md) and the
-[release notes](docs/release-notes-v0.2.4.md) for what it includes.
+[release notes](docs/release-notes-v0.3.0.md) for what it includes.
 v0.1.2 was driven by an independent external review (Google Gemini 4
 Neon); the full review is in
 [docs/reviews/gemini-2026-11-22.md](docs/reviews/gemini-2026-11-22.md).
