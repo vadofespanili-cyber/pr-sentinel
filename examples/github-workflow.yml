@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: vadofespanili-cyber/pr-sentinel@v0.2.4
+      - uses: vadofespanili-cyber/pr-sentinel@v0.3.0
         with:
           api_key: ${{ secrets.PR_SENTINEL_API_KEY }}
           fail_on_severity: high
