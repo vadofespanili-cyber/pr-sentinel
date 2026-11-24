@@ -99,13 +99,14 @@ def test_inline_comments_use_line_and_side():
             "side": "RIGHT",
             "body": (
                 "**high · bug**\n\nUnused import.\n\n**Suggestion:** Remove the import."
+                "\n\n<!-- pr-sentinel:inline -->"
             ),
         },
         {
             "path": "src/a.py",
             "line": 3,
             "side": "RIGHT",
-            "body": "**low · style**\n\nImport order.",
+            "body": "**low · style**\n\nImport order.\n\n<!-- pr-sentinel:inline -->",
         },
     ]
 
@@ -126,7 +127,7 @@ def test_inline_comments_cover_context_lines_but_skip_unmapped_findings():
             "path": "src/a.py",
             "line": 1,
             "side": "RIGHT",
-            "body": "**medium · bug**\n\nContext line.",
+            "body": "**medium · bug**\n\nContext line.\n\n<!-- pr-sentinel:inline -->",
         }
     ]
 
@@ -148,6 +149,19 @@ def test_summary_contains_hidden_marker():
     # The marker is the last line, so it never leaks into the table.
     summary = build_summary(sample_findings(), pr_number=42)
     assert summary.rstrip("\n").splitlines()[-1] == SUMMARY_MARKER
+
+
+def test_inline_comments_carry_hidden_marker():
+    """Every inline comment carries the hidden marker used for
+    deduplication and thread resolution (v0.3.0), as its last line."""
+    from pr_sentinel.reporter import INLINE_MARKER
+
+    diff_files = parse_diff(SAMPLE_DIFF)
+    comments = build_inline_comments(sample_findings(), diff_files)
+    assert comments
+    for comment in comments:
+        assert comment["body"].rstrip("\n").splitlines()[-1] == INLINE_MARKER
+        assert INLINE_MARKER in comment["body"]
 
 
 # --- Reviewed commit line (v0.2.1) ------------------------------------------

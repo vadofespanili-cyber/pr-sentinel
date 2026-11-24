@@ -3,11 +3,13 @@
 import pytest
 
 from pr_sentinel.config import (
+    MAX_INSTRUCTIONS_CHARS,
     Config,
     ConfigError,
     api_key_from_env,
     load_config,
     parse_config_text,
+    resolve_instructions,
 )
 
 
@@ -205,3 +207,215 @@ def test_fail_on_severity_invalid_value():
         parse_config_text("fail_on_severity: urgent\n")
     with pytest.raises(ConfigError, match="fail_on_severity"):
         parse_config_text("fail_on_severity: 3\n")
+
+
+# --- api_format (v0.3.0) ---------------------------------------------------
+
+
+def test_api_format_default_is_responses():
+    assert Config().api_format == "responses"
+    assert parse_config_text("").api_format == "responses"
+
+
+def test_api_format_valid_values_are_normalized():
+    assert (
+        parse_config_text("api_format: chat_completions\n").api_format
+        == "chat_completions"
+    )
+    assert (
+        parse_config_text("api_format: Chat_Completions\n").api_format
+        == "chat_completions"
+    )
+    assert Config(api_format=" RESPONSES ").api_format == "responses"
+
+
+def test_api_format_invalid_value():
+    with pytest.raises(ConfigError, match="api_format"):
+        parse_config_text("api_format: rest\n")
+    with pytest.raises(ConfigError, match="api_format"):
+        parse_config_text("api_format: ''\n")
+
+
+def test_api_format_wrong_type_is_rejected():
+    config = Config(api_format=3)
+    with pytest.raises(ConfigError, match="api_format"):
+        config.validate()
+
+
+# --- instructions / instructions_file (v0.3.0) ------------------------------
+
+
+def test_instructions_defaults_are_none():
+    assert Config().instructions is None
+    assert Config().instructions_file is None
+    assert resolve_instructions(Config()) is None
+
+
+def test_instructions_inline():
+    config = parse_config_text('instructions: "Focus on security."\n')
+    assert config.instructions == "Focus on security."
+    assert resolve_instructions(config) == "Focus on security."
+
+
+def test_instructions_blank_string_is_none():
+    assert parse_config_text("instructions: ''\n").instructions is None
+    assert Config(instructions="   ").instructions is None
+
+
+def test_instructions_file(tmp_path, monkeypatch):
+    # The file is resolved relative to the config file's directory,
+    # not the working directory.
+    subdir = tmp_path / "config"
+    subdir.mkdir()
+    rules = subdir / "review-rules.md"
+    rules.write_text("Never suggest tabs.\n", encoding="utf-8")
+    config_path = subdir / ".pr-sentinel.yml"
+    config_path.write_text("instructions_file: review-rules.md\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    config = load_config(str(config_path))
+    assert resolve_instructions(config) == "Never suggest tabs.\n"
+
+
+def test_instructions_file_wins_over_inline(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("File wins.\n", encoding="utf-8")
+    config = parse_config_text(
+        "instructions: Inline.\ninstructions_file: review-rules.md\n",
+        base_dir=str(tmp_path),
+    )
+    assert resolve_instructions(config) == "File wins.\n"
+
+
+def test_instructions_file_missing_raises(tmp_path):
+    config = Config(instructions_file="no-such-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="instructions_file not found"):
+        config.validate()
+
+
+def test_instructions_file_absolute_path_rejected(tmp_path):
+    # Absolute paths are never read, even when the file exists.
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("Secret rules.\n", encoding="utf-8")
+    config = Config(instructions_file=str(rules))
+    with pytest.raises(ConfigError, match="must be a relative path"):
+        config.validate()
+    with pytest.raises(ConfigError, match="must be a relative path"):
+        resolve_instructions(config)
+    # /etc/passwd is the canonical traversal target.
+    with pytest.raises(ConfigError, match="must be a relative path"):
+        Config(instructions_file="/etc/passwd").validate()
+
+
+def test_instructions_file_dotdot_escape_rejected(tmp_path):
+    # A file that exists outside the config directory is still
+    # rejected: ".." must not escape the config directory.
+    outside = tmp_path / "outside.md"
+    outside.write_text("Outside rules.\n", encoding="utf-8")
+    subdir = tmp_path / "config"
+    subdir.mkdir()
+    config = Config(instructions_file="../outside.md", config_dir=str(subdir))
+    with pytest.raises(ConfigError, match="escapes the config directory"):
+        config.validate()
+    with pytest.raises(ConfigError, match="escapes the config directory"):
+        resolve_instructions(config)
+
+
+def test_instructions_file_deleted_after_load_raises(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("Gone soon.\n", encoding="utf-8")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    config.validate()
+    rules.unlink()
+    with pytest.raises(ConfigError, match="not readable"):
+        resolve_instructions(config)
+
+
+def test_instructions_file_invalid_utf8_raises(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_bytes(b"Not text: \xff\xfe\x00\n")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="not readable"):
+        config.validate()
+    with pytest.raises(ConfigError, match="not readable"):
+        resolve_instructions(config)
+
+
+def test_instructions_over_cap_raises():
+    config = Config(instructions="x" * 4001)
+    with pytest.raises(ConfigError, match="4000"):
+        config.validate()
+    # Exactly at the cap is fine.
+    Config(instructions="x" * 4000).validate()
+
+
+def test_instructions_file_over_cap_raises(tmp_path):
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * 4001, encoding="utf-8")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="4000"):
+        config.validate()
+
+
+def test_instructions_file_at_cap_loads(tmp_path):
+    # Exactly at the cap is fine, on both the validate() and the
+    # resolve_instructions() path.
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * MAX_INSTRUCTIONS_CHARS, encoding="utf-8")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    config.validate()
+    assert resolve_instructions(config) == "x" * MAX_INSTRUCTIONS_CHARS
+
+
+def test_instructions_file_over_cap_raises_in_resolve(tmp_path):
+    # The resolve path enforces the cap too, not just validate().
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * (MAX_INSTRUCTIONS_CHARS + 1), encoding="utf-8")
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="4000"):
+        resolve_instructions(config)
+
+
+def test_instructions_file_read_is_bounded(tmp_path, monkeypatch):
+    # The cap must be enforced by reading at most cap+1 characters:
+    # spy on open() and assert no read of the instructions file ever
+    # asks for more than the cap + 1 characters (and never an
+    # unbounded read), on either the validate() or the resolve path.
+    import builtins
+
+    rules = tmp_path / "review-rules.md"
+    rules.write_text("x" * 100_000, encoding="utf-8")
+    real_open = builtins.open
+    read_sizes: list[int] = []
+
+    class _SpyHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._handle.__exit__(*exc)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            return self._handle.read(size)
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def _spy_open(file, *args, **kwargs):
+        handle = real_open(file, *args, **kwargs)
+        if str(file) == str(rules):
+            return _SpyHandle(handle)
+        return handle
+
+    monkeypatch.setattr(builtins, "open", _spy_open)
+    config = Config(instructions_file="review-rules.md", config_dir=str(tmp_path))
+    with pytest.raises(ConfigError, match="4000"):
+        config.validate()
+    assert read_sizes == [MAX_INSTRUCTIONS_CHARS + 1]
+    read_sizes.clear()
+    with pytest.raises(ConfigError, match="4000"):
+        resolve_instructions(config)
+    assert read_sizes == [MAX_INSTRUCTIONS_CHARS + 1]

@@ -3,6 +3,8 @@
 All secrets below are fake values made up for tests; no real keys.
 """
 
+import pytest
+
 from pr_sentinel.diff import parse_diff
 from pr_sentinel.static_checks import run_static_checks
 
@@ -180,3 +182,266 @@ def test_deleted_and_context_lines_do_not_fire():
 def test_finding_line_numbers_follow_new_file():
     findings = _check(["ok = 1", "eval(x)", "ok = 2"])
     assert [f.line for f in findings if f.rule == "dangerous-eval"] == [3]
+
+
+# --- v0.3.0: Shannon entropy, placeholder filtering, inline ignore ---------
+
+
+def test_shannon_entropy_known_values():
+    from pr_sentinel.static_checks import shannon_entropy
+
+    assert shannon_entropy("") == 0.0
+    assert shannon_entropy("aaaa") == 0.0
+    assert shannon_entropy("ab") == pytest.approx(1.0)
+    assert shannon_entropy("abcdef") == pytest.approx(2.584962500721156)
+    assert shannon_entropy("hunter2") == pytest.approx(2.807354922057604)
+    assert shannon_entropy("aabbcc") == pytest.approx(1.584962500721156)
+
+
+def test_ignore_marker_suppresses_only_its_own_line():
+    # The marker lives inside the fixture string itself here, so the
+    # first three added lines opt out; the bare eval() on the last line
+    # is the only finding. Line numbers: the context line is 1, the
+    # added lines are 2-5.
+    lines = [
+        'api_key = "sk-' + "F" * 32 + '"  # pr-sentinel: ignore',
+        "import os  # PR-SENTINEL: IGNORE",
+        'x = eval("1")  # pr-sentinel: ignore',
+        'y = eval("2")',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 5
+
+
+def test_ignore_marker_works_with_js_and_c_comment_styles():
+    lines = [
+        'const key = "sk-' + "F" * 32 + '"; // pr-sentinel: ignore',
+        'const other = "sk-' + "F" * 32 + '"; /* pr-sentinel: ignore */',
+        'const real = "sk-' + "F" * 32 + '";',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "leaked-openai-key"
+    assert findings[0].line == 4
+
+
+def test_ignore_marker_without_comment_does_not_suppress():
+    # The marker words inside a string literal (no comment opener on
+    # the line) must not suppress a real finding.
+    line = (
+        'api_key = "sk-' + "F" * 32 + '" + " pr-sentinel: ignore"'
+    )  # pr-sentinel: ignore
+    findings = _check([line])
+    assert len(findings) == 1
+    assert findings[0].rule == "leaked-openai-key"
+
+
+def test_ignore_marker_inside_string_does_not_suppress():
+    # The marker inside a quoted string is not a comment: the eval()
+    # on the same line is still caught.
+    findings = _check(['x = "# pr-sentinel: ignore"; eval(u)'])
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_ignore_marker_survives_apostrophe_in_comment():
+    # An apostrophe in the comment ("don't") must not swallow the
+    # marker: the quote is only a string delimiter when it closes.
+    findings = _check(['x = eval("1")  # don\'t pr-sentinel: ignore'])
+    assert findings == []
+
+
+def test_ignore_marker_inside_multiline_string_does_not_suppress():
+    # A marker inside a triple-quoted string is string content, not a
+    # comment: the string closes on the same line before "; eval(u)",
+    # and the eval() is still caught. (The markers on the source lines
+    # are Python comments outside the fixture strings, so the checked
+    # diff text is unchanged; they keep our own review of this PR
+    # from flagging the fixtures themselves.)
+    lines = [
+        's = """',
+        '# pr-sentinel: ignore"""; eval(u)',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 3
+
+
+def test_ignore_marker_on_middle_line_of_multiline_string():
+    # The marker on a middle line of a triple-quoted string must not
+    # suppress anything: the eval() after the string closes fires.
+    lines = [
+        's = """',
+        "# pr-sentinel: ignore",
+        '"""; eval(u)',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 4
+
+
+def test_ignore_marker_after_closed_multiline_string_suppresses():
+    # Once the triple-quoted string has closed, a real comment marker
+    # on the same line still suppresses the finding.
+    lines = [
+        's = """',
+        'doc"""; eval(u)  # pr-sentinel: ignore',
+    ]
+    findings = _check(lines)
+    assert findings == []
+
+
+def test_ignore_marker_inside_single_quote_multiline_string():
+    # The same multiline behaviour with ''' delimiters.
+    lines = [
+        "s = '''",
+        "# pr-sentinel: ignore'''; eval(u)",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_ignore_marker_inside_template_literal_does_not_suppress():
+    # The bot's example: a // marker inside a backtick template
+    # literal is string content, not a comment: the eval() on the
+    # same line is still caught. (The marker on the source line is a
+    # Python comment outside the fixture string, so the checked diff
+    # text is unchanged; it keeps our own review of this PR from
+    # flagging the fixture itself.)
+    findings = _check(
+        ["const s = `// pr-sentinel: ignore`; eval(userInput)"]  # pr-sentinel: ignore
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_ignore_marker_on_middle_line_of_template_literal():
+    # The marker on a middle line of a multiline template literal
+    # must not suppress anything: the eval() after the literal
+    # closes fires.
+    lines = [
+        "const s = `",
+        "// pr-sentinel: ignore",
+        "`; eval(u)",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+    assert findings[0].line == 4
+
+
+def test_ignore_marker_after_closed_template_literal_suppresses():
+    # Once the template literal has closed, a real comment marker
+    # on the same line still suppresses the finding.
+    lines = [
+        "const s = `",
+        "text`; eval(u)  // pr-sentinel: ignore",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert findings == []
+
+
+def test_interpolation_inside_template_literal_is_code():
+    # ${...} inside a template literal is code, not string content:
+    # an eval() inside the interpolation still fires.
+    findings = _check(["const s = `value: ${eval(x)}`"])  # pr-sentinel: ignore
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_escaped_backtick_does_not_close_template_literal():
+    # An escaped backtick inside a template literal does not close
+    # it: the marker after it is still inside the string, so the
+    # eval() on the line is still caught.
+    findings = _check(
+        ["const s = `a \\` b // pr-sentinel: ignore`; eval(u)"]  # pr-sentinel: ignore
+    )
+    assert len(findings) == 1
+    assert findings[0].rule == "dangerous-eval"
+
+
+def test_real_words_ending_in_placeholder_are_not_suppressed():
+    # "contest" / "protest" / "latest" end in "test" but are real words,
+    # not fixtures — they must still fire. (The markers on the source
+    # lines are Python comments outside the fixture strings, so the
+    # checked diff text is unchanged; they keep our own review of this
+    # PR from flagging the fixtures themselves.)
+    lines = [
+        'password = "contest"',  # pr-sentinel: ignore
+        'password = "protest"',  # pr-sentinel: ignore
+        'password = "latest"',  # pr-sentinel: ignore
+        'token = "snowflake"',  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert [f.rule for f in findings] == ["hardcoded-credential"] * 4
+
+
+def test_placeholder_word_with_digits_is_suppressed():
+    # "test123" is the canonical fixture shape: a placeholder word
+    # followed by digits. (It fired before this fix; the docstring
+    # claimed otherwise.)
+    findings = _check(['password = "test123"'])  # pr-sentinel: ignore
+    assert findings == []
+
+
+def test_placeholder_values_are_suppressed():
+    lines = [
+        'token = "ghp_test"',
+        'key = "AKIA' + "IOSFODNN7EXAMPLE" + '"',
+        'password = "changeme"',
+        'api_key = "your_api_key_here"',
+        'token = "xxxx"',
+        'token = "aabbcc"',
+        'key = "sk-proj-testtesttesttesttest"',
+    ]
+    assert _check(lines) == []
+
+
+def test_realistic_secrets_still_fire():
+    # Regression tests: these look like real leaked secrets and must
+    # never be suppressed, even though they share prefixes with the
+    # placeholder examples above. (The marker on each source line is
+    # a Python comment outside the fixture string, so the checked
+    # diff text is unchanged; it keeps our own review of this PR
+    # from flagging the fixtures themselves.)
+    lines = [
+        'api_key = "sk-'
+        + "K7mQ2xR9vT4wY8pL3nB6cD1fG5hJ0kM"
+        + '"',  # pr-sentinel: ignore
+        'token = "ghp_'
+        + "aB3dE5fG7hJ9kL2mN4pQ6rS8tU0vW1xY3zA5bC"
+        + '"',  # pr-sentinel: ignore
+        'key = "AKIA' + "K7M2Q9X4V8B3N6P1R" + '"',  # pr-sentinel: ignore
+        "xoxb-" + "483920175638-1a2B3c4D5e6F7g8H9i0J",  # pr-sentinel: ignore
+    ]
+    findings = _check(lines)
+    assert [f.rule for f in findings] == [
+        "leaked-openai-key",
+        "leaked-github-token",
+        "leaked-aws-key",
+        "leaked-slack-token",
+    ]
+
+
+def test_fake_substring_key_still_fires():
+    # "sk-fake..." contains "fake" only as a substring of a longer
+    # component, not as a whole component or a suffix — it is a
+    # realistic key and must still fire.
+    findings = _check(
+        ['api_key = "sk-' + "fake1234567890abcdefghij" + '"]']
+    )  # pr-sentinel: ignore
+    assert len(findings) == 1
+    assert findings[0].rule == "leaked-openai-key"
+
+
+def test_private_key_header_is_never_a_placeholder():
+    # The dashes in a private key header would trip the repeated-char
+    # check, so the rule is exempt from placeholder filtering outright.
+    findings = _check(["-----BEGIN PRIVATE KEY-----"])
+    assert len(findings) == 1
+    assert findings[0].rule == "leaked-private-key"

@@ -164,6 +164,86 @@ class GitHubClient:
             ),
         )
 
+    def list_pull_review_comments(
+        self, owner: str, repo: str, number: int
+    ) -> list[dict[str, Any]]:
+        """List all inline review comments on a PR, following pagination."""
+        comments: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            page_comments = cast(
+                list[dict[str, Any]],
+                self._request(
+                    "GET",
+                    f"/repos/{_quote(owner)}/{_quote(repo)}/pulls/{number}"
+                    f"/comments?per_page=100&page={page}",
+                ),
+            )
+            comments.extend(page_comments)
+            if len(page_comments) < 100:
+                break
+            page += 1
+        return comments
+
+    def graphql(
+        self, query: str, variables: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Run one GraphQL query/mutation; raises on GraphQL errors."""
+        body: dict[str, Any] = {"query": query}
+        if variables is not None:
+            body["variables"] = variables
+        result = cast(dict[str, Any], self._request("POST", "/graphql", body=body))
+        errors = result.get("errors")
+        if errors:
+            first = errors[0] if isinstance(errors, list) else errors
+            message = first.get("message") if isinstance(first, dict) else str(first)
+            raise GitHubError(f"GitHub GraphQL error: {message}")
+        data = result.get("data")
+        if not isinstance(data, dict):
+            raise GitHubError("GitHub GraphQL response had no data")
+        return data
+
+    def list_review_threads(
+        self, owner: str, repo: str, number: int
+    ) -> list[dict[str, Any]]:
+        """A PR's review threads (id, path, line, resolved, comments).
+
+        Used to resolve our own outdated inline-comment threads on
+        re-pushes. Only the first 100 threads are considered.
+        """
+        query = (
+            "query($owner: String!, $repo: String!, $number: Int!) {"
+            " repository(owner: $owner, name: $repo) {"
+            "  pullRequest(number: $number) {"
+            "   reviewThreads(first: 100) {"
+            "    nodes { id isResolved path line"
+            "     comments(first: 10) { nodes { body author { __typename login } } }"
+            "    }"
+            "   }"
+            "  }"
+            " }"
+            "}"
+        )
+        data = self.graphql(query, {"owner": owner, "repo": repo, "number": number})
+        repository = data.get("repository") or {}
+        pull = repository.get("pullRequest") or {}
+        threads = pull.get("reviewThreads") or {}
+        nodes = threads.get("nodes") or []
+        return [node for node in nodes if isinstance(node, dict)]
+
+    def resolve_review_thread(self, thread_id: str) -> dict[str, Any]:
+        """Resolve one review thread (GraphQL resolveReviewThread)."""
+        mutation = (
+            "mutation($threadId: ID!) {"
+            " resolveReviewThread(input: {threadId: $threadId}) {"
+            "  thread { id isResolved }"
+            " }"
+            "}"
+        )
+        data = self.graphql(mutation, {"threadId": thread_id})
+        resolved = data.get("resolveReviewThread") or {}
+        return resolved.get("thread") or {}
+
     def create_review(
         self,
         owner: str,

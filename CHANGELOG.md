@@ -3,6 +3,141 @@
 All notable changes to pr-sentinel are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **Smart false-positive reduction in static checks.** An added line
+  carrying `pr-sentinel: ignore` inside a comment (`#`, `//` or
+  `/* ... */`, case-insensitive) suppresses static findings on that
+  exact line — for intentional fixtures such as `eval()` in tests.
+  Secret matches that are obvious placeholders (`test`/`dummy`/
+  `example`/`fake` values, `changeme`, `your_...`, repeated
+  characters, very short low-entropy values) are filtered by a
+  stdlib-only Shannon entropy helper, while real high-entropy secrets
+  (genuine AWS keys, private key headers, realistic `sk-proj-...` /
+  `ghp_...` tokens) are still reported — with regression tests pinning
+  both sides.
+- **Chat Completions provider support (`api_format`).** New config
+  setting `api_format` (`responses` by default, `chat_completions`
+  for OpenRouter, Ollama, Groq, vLLM and any OpenAI-compatible
+  provider), plus a `--api-format` flag on `review` / `review-diff`
+  and an `api_format` Action input. Retry/backoff, timeout, JSON
+  parsing and prompt-injection delimiters are identical for both
+  formats; an invalid value is a config error.
+- **Custom repo instructions.** New `instructions` (inline) and
+  `instructions_file` (path) config settings (max 4,000 chars; the
+  file wins over the inline string; a missing/unreadable file or an
+  over-cap value is a config error). Instructions are injected into
+  the reviewer prompt as repository guidelines, clearly separated
+  from the untrusted diff delimiters.
+- **Risk-prioritized diff ordering.** Before `max_diff_chars` /
+  `max_files` truncation, files are sorted by risk tier (CI/CD and
+  auth/security/crypto first, core source next, tests next, docs and
+  lockfiles last; stable within a tier), so the most security-relevant
+  files survive a cut. Hunk headers now keep their enclosing
+  function/class context when rendered for the model.
+- **Clean inline comment lifecycle.** Inline comments carry a hidden
+  `<!-- pr-sentinel:inline -->` marker: re-pushes no longer duplicate
+  an identical comment from the bot, and threads the bot opened for
+  findings that are now fixed are resolved automatically via GraphQL
+  (`resolveReviewThread`). Both are best effort — a failed listing or
+  GraphQL call warns on stderr and the review still succeeds.
+  `--dry-run` never lists, posts or resolves anything.
+
+### Fixed
+
+- **`Cargo.lock` was not recognized as a lockfile** in risk
+  ordering: the lockfile set compared a lowercased basename against
+  a mixed-case entry, so `Cargo.lock` landed in the core-source tier
+  instead of the lowest tier.
+- **`instructions_file` path traversal (external review).**
+  `instructions_file` must now be a relative path that stays inside
+  the config file's directory (absolute paths and `..` escapes are
+  config errors), and undecodable bytes are a config error instead of
+  crashing the review.
+- **GraphQL bot-ownership check (external review).** In GitHub Actions
+  the author login is `github-actions` (no `[bot]` suffix) and
+  `GET /user` fails with 403 on `GITHUB_TOKEN`, so auto-resolving our
+  own threads never matched. The query now fetches
+  `author { __typename login }` and a thread counts as ours when its
+  root comment (`nodes[0]`) carries the inline marker and its author
+  is a `Bot` (or the token user, or a `[bot]` login).
+- **PR-author prompt injection via repo `instructions` (external
+  review).** Guidelines no longer go into the system prompt: they are
+  placed in the user message as lower-priority style/focus
+  preferences, and the system prompt states explicitly that they can
+  never override the core security rules, the JSON output schema, or
+  instruct the reviewer to suppress or ignore findings. The README
+  advises repos with untrusted external PRs to load config from the
+  base branch or a trusted `--config` path.
+- **Inline deduplication now runs before `max_inline_comments`
+  (external review).** Previously posted findings no longer crowd out
+  new findings on re-pushes.
+- **Static-check suppression and placeholder matching tightened
+  (external review).** `pr-sentinel: ignore` inside a quoted string
+  literal no longer suppresses a finding, and placeholder matching is
+  now exact-component / word-plus-digits — real words like `contest`,
+  `protest` and `latest` are reported again, while genuine fixtures
+  (`ghp_test`, `test123`, the AWS docs example key) stay suppressed.
+- **List-shaped `content` in `chat_completions` (external review).**
+  Providers that return `message.content` as a list of content blocks
+  (`[{"type": "text", "text": "..."}]`) now have their text blocks
+  joined instead of the reply being dropped as "no output text".
+- **`instructions_file` is read bounded (bot review).** The file was
+  read completely before its 4,000-character cap was checked; it is
+  now read at most cap+1 characters in both `validate()` and
+  `resolve_instructions()`, so a very large file is rejected without
+  ever loading it fully.
+- **Ignore marker inside a multiline string (bot review).** String
+  stripping is now stateful across the added lines of a file: a
+  `pr-sentinel: ignore` inside a triple-quoted string no longer
+  suppresses a finding on the line where the string closes. A real
+  comment marker after the string closes still suppresses.
+- **Null-line review threads now resolve when their file is clean
+  (bot review).** A thread whose diff position is outdated (null
+  line) was skipped, so a finding fixed by removing or moving the
+  line stayed unresolved. It is now resolved when its file has no
+  current findings at any line; while the file still has a finding
+  it is left alone (the finding may have moved to another line).
+- **Real privilege separation on the Responses API path (bot
+  review).** The system prompt was concatenated with the user
+  content into one `input` string, so the API treated it as user
+  input and repo-controlled guidelines did not have the promised
+  lower priority. The system prompt is now sent in the Responses
+  API's separate `instructions` field, with the guidelines + diff
+  in `input` — the same separation the Chat Completions path gets
+  from its system/user roles. Note: `instructions` is part of the
+  Responses API, but a minimal provider that rejects it can be used
+  via `api_format: chat_completions` instead.
+- **Ignore marker inside a JavaScript template literal (bot
+  review).** The string stripper only handled `'`/`"` literals, so
+  a `// pr-sentinel: ignore` inside a backtick template literal
+  wrongly suppressed a finding on that line. Backticks are now
+  tracked like triple-quoted strings (including across lines), while
+  `${...}` interpolations stay visible as code — an `eval()` inside
+  an interpolation still fires, and an escaped backtick does not
+  close the literal early.
+- **Auto-resolver no longer closes threads the review never saw
+  (bot review).** Thread resolution ran against the severity-filtered
+  findings, so a finding hidden by the severity threshold — or in a
+  file/hunk dropped by `max_diff_chars` / `max_files` /
+  `ignore_paths` — looked "fixed" and its thread was resolved. The
+  resolver now uses the pre-filter findings and the review coverage:
+  a thread is resolved only when its location was actually reviewed
+  and no finding remains there. A thread in a dropped file or inside
+  a dropped hunk is never resolved, and a null-line thread is
+  resolved only when its file was fully reviewed.
+
+### Changed
+
+- README documents `api_format` (with OpenRouter/Ollama examples),
+  `instructions` / `instructions_file`, `pr-sentinel: ignore`, and
+  the inline-comment lifecycle; the Limitations section now states
+  the placeholder-filtering and GraphQL trade-offs honestly.
+- The example config (`examples/pr-sentinel.example.yaml`) shows the
+  new settings (commented where optional).
+
 ## [0.2.4] - 2026-11-23
 
 ### Added

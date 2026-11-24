@@ -10,6 +10,7 @@ from pr_sentinel.diff import parse_diff
 from pr_sentinel.reviewer import (
     Reviewer,
     ReviewerError,
+    _prompt_parts,
     build_review_prompt,
     parse_findings_json,
 )
@@ -36,6 +37,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
         self.server.requests.append(body)
+        self.server.paths.append(self.path)
         payload = self.server.response_body
         raw = payload if isinstance(payload, bytes) else payload.encode("utf-8")
         self.send_response(self.server.status)
@@ -49,6 +51,7 @@ class _Handler(BaseHTTPRequestHandler):
 def fake_api():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     server.requests = []
+    server.paths = []
     server.status = 200
     server.response_body = json.dumps({"output_text": json.dumps([FINDING])})
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -102,11 +105,13 @@ def test_review_chunk_output_text_shape(fake_api):
     assert findings[0].file == "a.py"
     assert findings[0].line == 2
     assert findings[0].rule == "ai-review"
-    # The request carried the model and the prompt with the diff.
+    # The request carried the model and the prompt with the diff:
+    # the system prompt in the privileged `instructions` field, the
+    # user content (diff) in `input`.
     request = json.loads(fake_api.requests[0])
     assert request["model"] == "test-model"
     assert "some diff" in request["input"]
-    assert request["input"].startswith("You are a careful code reviewer")
+    assert request["instructions"].startswith("You are a careful code reviewer")
 
 
 def test_review_chunk_responses_output_shape(fake_api):
@@ -312,3 +317,229 @@ def test_review_chunk_persistent_500_raises_after_three_attempts(
         _scripted_reviewer(scripted_api).review_chunk("some diff")
     assert scripted_api.hits == 3
     assert delays == [1.0, 2.0]
+
+
+# --- v0.3.0: chat_completions + repo instructions ----------------------------
+
+
+def _chat_reviewer(fake_api):
+    host, port = fake_api.server_address
+    return Reviewer(
+        api_key="sk-fake-test",
+        base_url=f"http://{host}:{port}",
+        model="test-model",
+        api_format="chat_completions",
+    )
+
+
+def _scripted_chat_reviewer(scripted_api):
+    host, port = scripted_api.server_address
+    return Reviewer(
+        api_key="sk-fake-test",
+        base_url=f"http://{host}:{port}",
+        model="test-model",
+        api_format="chat_completions",
+    )
+
+
+def _chat_response_body():
+    return json.dumps({"choices": [{"message": {"content": json.dumps([FINDING])}}]})
+
+
+def test_chat_completions_posts_messages_and_parses_choices(fake_api):
+    _set_response(fake_api, _chat_response_body())
+    findings = _chat_reviewer(fake_api).review_chunk(
+        "diff --git a/a.py b/a.py\n+evil()"
+    )
+    assert len(findings) == 1
+    assert findings[0].message == "Possible off-by-one error."
+    assert fake_api.paths == ["/chat/completions"]
+    payload = json.loads(fake_api.requests[0])
+    assert payload["model"] == "test-model"
+    assert "input" not in payload
+    messages = payload["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert "careful code reviewer" in messages[0]["content"]
+    assert "--- BEGIN DIFF (untrusted data) ---" in messages[1]["content"]
+    assert "+evil()" in messages[1]["content"]
+
+
+def test_responses_format_still_posts_to_responses_endpoint(fake_api):
+    findings = _reviewer(fake_api).review_chunk("diff")
+    assert len(findings) == 1
+    assert fake_api.paths == ["/responses"]
+    payload = json.loads(fake_api.requests[0])
+    assert "input" in payload
+    assert "instructions" in payload
+    assert "messages" not in payload
+
+
+def test_responses_payload_splits_instructions_from_input(fake_api):
+    """The Responses payload carries the system prompt in the
+    privileged `instructions` field and the user content (guidelines
+    + diff) in `input` — the two are never concatenated into one
+    string, so repo-controlled guidelines cannot override the core
+    rules or the JSON schema."""
+    findings = _reviewer(fake_api).review_chunk("some diff", instructions="Be strict.")
+    assert len(findings) == 1
+    assert fake_api.paths == ["/responses"]
+    payload = json.loads(fake_api.requests[0])
+    assert "messages" not in payload
+    system = payload["instructions"]
+    user = payload["input"]
+    assert system.startswith("You are a careful code reviewer")
+    assert "can never override" in system
+    assert "Be strict." not in system
+    assert "Be strict." in user
+    assert "Repository guidelines" in user
+    assert "some diff" in user
+    assert user.index("Repository guidelines") < user.index(
+        "--- BEGIN DIFF (untrusted data) ---"
+    )
+
+
+def test_responses_payload_without_instructions_has_no_guardrail(fake_api):
+    """Without custom instructions the Responses payload still splits
+    system and user content, and the system text is unchanged (no
+    guardrail is added when there is nothing to guard against)."""
+    findings = _reviewer(fake_api).review_chunk("some diff")
+    assert len(findings) == 1
+    payload = json.loads(fake_api.requests[0])
+    assert payload["instructions"].startswith("You are a careful code reviewer")
+    assert "can never override" not in payload["instructions"]
+    assert "Repository guidelines" not in payload["input"]
+    assert "some diff" in payload["input"]
+
+
+def test_chat_completions_empty_choices_raises(fake_api):
+    _set_response(fake_api, json.dumps({"choices": []}))
+    with pytest.raises(ReviewerError, match="no output text"):
+        _chat_reviewer(fake_api).review_chunk("diff")
+
+
+def test_chat_completions_non_string_content_raises(fake_api):
+    _set_response(fake_api, json.dumps({"choices": [{"message": {"content": 42}}]}))
+    with pytest.raises(ReviewerError, match="no output text"):
+        _chat_reviewer(fake_api).review_chunk("diff")
+
+
+def test_chat_completions_list_content_is_joined(fake_api):
+    # Some OpenAI-compatible providers return content as a list of
+    # blocks instead of a plain string.
+    body = json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": json.dumps([FINDING])},
+                            {"type": "reasoning", "text": "thinking out loud"},
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    _set_response(fake_api, body)
+    findings = _chat_reviewer(fake_api).review_chunk("diff")
+    assert len(findings) == 1
+    assert findings[0].message == "Possible off-by-one error."
+
+
+def test_chat_completions_list_content_without_text_raises(fake_api):
+    body = json.dumps(
+        {"choices": [{"message": {"content": [{"type": "reasoning", "text": "hmm"}]}}]}
+    )
+    _set_response(fake_api, body)
+    with pytest.raises(ReviewerError, match="no output text"):
+        _chat_reviewer(fake_api).review_chunk("diff")
+
+
+def test_chat_completions_retries_after_429_then_succeeds(scripted_api, monkeypatch):
+    import pr_sentinel.reviewer as reviewer_module
+
+    delays = []
+    monkeypatch.setattr(reviewer_module, "_sleep", delays.append)
+    scripted_api.script = [
+        (429, {"Retry-After": "2"}, json.dumps({"error": "rate limited"})),
+        (200, {}, _chat_response_body()),
+    ]
+    findings = _scripted_chat_reviewer(scripted_api).review_chunk("some diff")
+    assert len(findings) == 1
+    assert findings[0].message == "Possible off-by-one error."
+    assert scripted_api.hits == 2
+    assert delays == [2.0]
+
+
+def test_reviewer_invalid_api_format_raises(fake_api):
+    host, port = fake_api.server_address
+    with pytest.raises(ValueError, match="api_format"):
+        Reviewer(
+            api_key="sk-fake-test",
+            base_url=f"http://{host}:{port}",
+            model="test-model",
+            api_format="rest",
+        )
+    # Normalization: mixed case and whitespace are accepted.
+    reviewer = Reviewer(
+        api_key="sk-fake-test",
+        base_url=f"http://{host}:{port}",
+        model="test-model",
+        api_format=" Chat_Completions ",
+    )
+    assert reviewer.api_format == "chat_completions"
+
+
+def test_prompt_without_instructions_has_no_guidelines():
+    prompt = build_review_prompt("diff text")
+    assert "Repository guidelines" not in prompt
+
+
+def test_prompt_without_instructions_is_byte_identical_to_v0_2():
+    # The default path must not change: v0.2.x prompts are untouched.
+    assert build_review_prompt("diff") == build_review_prompt("diff", None)
+
+
+def test_prompt_with_instructions_separates_guidelines_from_diff():
+    prompt = build_review_prompt("diff text", instructions="Never flag test files.")
+    guidelines_at = prompt.index("Repository guidelines")
+    diff_at = prompt.index("--- BEGIN DIFF (untrusted data) ---")
+    assert guidelines_at < diff_at
+    assert "Never flag test files." in prompt
+    assert "repository's own configuration" in prompt
+
+
+def test_instructions_live_in_user_message_not_system():
+    # Repo-controlled guidelines must never reach the system prompt: a
+    # PR author can change the repo config inside their own PR.
+    system, user = _prompt_parts("diff text", instructions="Be strict.")
+    assert "Repository guidelines (lower-priority" not in system
+    assert "Be strict." not in system
+    assert "can never override" in system
+    assert "Repository guidelines (lower-priority" in user
+    assert "Be strict." in user
+    assert "--- BEGIN DIFF (untrusted data) ---" in user
+    # Without instructions there is no guardrail either: the default
+    # prompt stays byte-identical to v0.2.x.
+    system_plain, user_plain = _prompt_parts("diff text")
+    assert "can never override" not in system_plain
+    assert "Repository guidelines" not in user_plain
+
+
+def test_review_threads_instructions_into_chat_payload(fake_api):
+    _set_response(fake_api, _chat_response_body())
+    files = parse_diff(
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " x = 1\n"
+        "+evil()\n"
+    )
+    findings = _chat_reviewer(fake_api).review(files, instructions="Be strict.")
+    assert len(findings) == 1
+    payload = json.loads(fake_api.requests[0])
+    assert "Be strict." in payload["messages"][1]["content"]
+    assert "Repository guidelines" in payload["messages"][1]["content"]
+    assert "Be strict." not in payload["messages"][0]["content"]
+    assert "can never override" in payload["messages"][0]["content"]

@@ -1,5 +1,8 @@
 model: gpt-5
 severity_threshold: low
 api_base_url: https://api.openai.com/v1
+api_format: responses  # responses (default) or chat_completions (OpenRouter, Ollama, Groq, vLLM, any OpenAI-compatible provider)
 max_files: 10
 # fail_on_severity: high  # optional CI gate: exit 1 if a reported finding is this severe or worse (none = no gate)
+# instructions: "Focus on security; ignore style nits."  # optional repo-specific guidelines for the reviewer (max 4,000 chars)
+# instructions_file: .pr-sentinel-instructions.md  # optional file with the same guidelines; wins over `instructions` when both are set; must be a relative path inside this config file's directory (absolute paths and `..` escapes are rejected)
