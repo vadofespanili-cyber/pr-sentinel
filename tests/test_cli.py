@@ -13,7 +13,13 @@ import pytest
 
 import pr_sentinel.cli as cli_module
 from pr_sentinel import __version__
-from pr_sentinel.cli import _post_review, _prepare_review, main
+from pr_sentinel.cli import (
+    ReviewCoverage,
+    ReviewState,
+    _post_review,
+    _prepare_review,
+    main,
+)
 from pr_sentinel.config import Config
 from pr_sentinel.diff import parse_diff
 from pr_sentinel.findings import Finding
@@ -622,7 +628,7 @@ def test_prepare_review_ignores_files_before_max_files(monkeypatch, capsys):
         "+eval(a)\n"  # pr-sentinel: ignore
     )
     config = Config(ignore_paths=["vendor/**"], max_files=1, severity_threshold="low")
-    _summary, findings, files = _prepare_review(config, diff)
+    _summary, findings, files, _state = _prepare_review(config, diff)
     assert [f.path for f in files] == ["src/a.py"]
     assert [f.file for f in findings] == ["src/a.py"]
     err = capsys.readouterr().err
@@ -656,7 +662,7 @@ def test_prepare_review_drops_whole_trailing_files_over_size_limit(monkeypatch, 
     files = parse_diff(first + second)
     budget = len(files[0].render_patch()) + 5  # first file fits, both do not
     config = Config(max_diff_chars=budget, severity_threshold="low")
-    _summary, findings, kept = _prepare_review(config, first + second)
+    _summary, findings, kept, _state = _prepare_review(config, first + second)
     assert [f.path for f in kept] == ["one.py"]
     assert len(kept[0].hunks) == 2
     assert all(f.file == "one.py" for f in findings)
@@ -675,7 +681,7 @@ def test_prepare_review_keeps_single_oversized_hunk_whole(monkeypatch, capsys):
         "@@ -0,0 +1,20 @@\n" + body
     )
     config = Config(max_diff_chars=50, severity_threshold="low")
-    _summary, _findings, kept = _prepare_review(config, diff)
+    _summary, _findings, kept, _state = _prepare_review(config, diff)
     assert len(kept) == 1
     assert len(kept[0].hunks) == 1
     assert len(kept[0].hunks[0].lines) == 20
@@ -1609,7 +1615,7 @@ def test_prepare_review_risk_sorting_keeps_workflow_first_under_max_files(
     even though it is last in the diff."""
     monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
     config = Config(max_files=1, severity_threshold="low")
-    _summary, _findings, files = _prepare_review(config, _three_file_diff())
+    _summary, _findings, files, _state = _prepare_review(config, _three_file_diff())
     assert [f.path for f in files] == [".github/workflows/ci.yml"]
     assert "reviewing the first 1 of 3 files" in capsys.readouterr().err
 
@@ -1628,7 +1634,7 @@ def test_prepare_review_risk_sorting_drops_docs_first_under_size_limit(
         + 5
     )
     config = Config(max_diff_chars=budget, severity_threshold="low")
-    _summary, _findings, kept = _prepare_review(config, _three_file_diff())
+    _summary, _findings, kept, _state = _prepare_review(config, _three_file_diff())
     assert [f.path for f in kept] == [".github/workflows/ci.yml", "src/a.py"]
     assert "diff exceeds max_diff_chars" in capsys.readouterr().err
 
@@ -1827,6 +1833,165 @@ def test_post_review_keeps_null_line_thread_of_another_user():
     files = parse_diff(SAMPLE_DIFF)
     _post_review(client, "o", "r", 1, Config(), "Summary.", [], files)
     assert client.resolved == []
+
+
+# --- Resolver incomplete-view fix (v0.3.0) ------------------------------------
+#
+# The resolver must only resolve a thread when the review actually
+# covered its location. Before this fix it resolved against the
+# severity-filtered findings, so a finding hidden by the threshold —
+# or in a file/hunk dropped by a size/file limit — looked "fixed".
+
+
+def _post_review_with_state(client, findings, files, state):
+    _post_review(client, "o", "r", 1, Config(), "Summary.", findings, files, state)
+
+
+def test_post_review_keeps_thread_for_severity_filtered_finding():
+    """A low finding filtered out of the report is still open: its
+    thread must not be resolved."""
+    client = _StubClient()
+    client.threads = [_own_thread()]
+    files = parse_diff(SAMPLE_DIFF)
+    state = ReviewState(
+        all_findings=[Finding("low", "style", "src/a.py", 2, "Low finding.")],
+        coverage=ReviewCoverage(),
+    )
+    _post_review_with_state(client, [], files, state)
+    assert client.resolved == []
+
+
+def test_post_review_keeps_thread_in_dropped_file():
+    """A thread in a file dropped by a size/file limit was never
+    reviewed on this push: it must not be resolved."""
+    client = _StubClient()
+    client.threads = [_own_thread()]
+    state = ReviewState(
+        all_findings=[], coverage=ReviewCoverage(dropped_files={"src/a.py"})
+    )
+    _post_review_with_state(client, [], [], state)
+    assert client.resolved == []
+
+
+def test_post_review_resolves_fixed_finding_with_review_state():
+    """A genuinely fixed finding still resolves when the review state
+    is present and nothing was dropped or filtered."""
+    client = _StubClient()
+    client.threads = [_own_thread()]
+    files = parse_diff(SAMPLE_DIFF)
+    state = ReviewState(all_findings=[], coverage=ReviewCoverage())
+    _post_review_with_state(client, [], files, state)
+    assert client.resolved == ["T1"]
+
+
+def test_post_review_keeps_null_line_thread_in_partially_truncated_file():
+    """A null-line thread is not resolved when its file lost a hunk
+    to the size limit: the finding may still sit in the dropped hunk."""
+    client = _StubClient()
+    client.threads = [_own_thread(line=None)]
+    files = parse_diff(SAMPLE_DIFF)
+    state = ReviewState(
+        all_findings=[],
+        coverage=ReviewCoverage(dropped_ranges={"src/a.py": [(10, 20)]}),
+    )
+    _post_review_with_state(client, [], files, state)
+    assert client.resolved == []
+
+
+def test_post_review_resolves_null_line_thread_in_fully_reviewed_file_with_state():
+    """A null-line thread in a fully reviewed file with no remaining
+    findings still resolves."""
+    client = _StubClient()
+    client.threads = [_own_thread(line=None)]
+    files = parse_diff(SAMPLE_DIFF)
+    state = ReviewState(all_findings=[], coverage=ReviewCoverage())
+    _post_review_with_state(client, [], files, state)
+    assert client.resolved == ["T1"]
+
+
+def test_post_review_keeps_thread_inside_dropped_hunk():
+    """A thread on a line inside a dropped hunk was never reviewed:
+    it must not be resolved."""
+    client = _StubClient()
+    client.threads = [_own_thread(line=15)]
+    files = parse_diff(SAMPLE_DIFF)
+    state = ReviewState(
+        all_findings=[],
+        coverage=ReviewCoverage(dropped_ranges={"src/a.py": [(10, 20)]}),
+    )
+    _post_review_with_state(client, [], files, state)
+    assert client.resolved == []
+
+
+def test_post_review_resolves_thread_in_kept_hunk_of_partially_truncated_file():
+    """The guard is hunk-level, not file-level: a thread on a line in
+    a kept hunk of a partially truncated file still resolves when the
+    finding is genuinely gone."""
+    client = _StubClient()
+    client.threads = [_own_thread(line=2)]
+    files = parse_diff(SAMPLE_DIFF)
+    state = ReviewState(
+        all_findings=[],
+        coverage=ReviewCoverage(dropped_ranges={"src/a.py": [(10, 20)]}),
+    )
+    _post_review_with_state(client, [], files, state)
+    assert client.resolved == ["T1"]
+
+
+def test_prepare_review_state_keeps_severity_filtered_findings(monkeypatch):
+    """_prepare_review keeps the pre-filter findings in the review
+    state even when the severity threshold hides them from the report."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    low = Finding("low", "style", "src/a.py", 2, "Low finding.")
+    monkeypatch.setattr(
+        "pr_sentinel.cli._collect_findings",
+        lambda files, config, instructions=None: ([low], False),
+    )
+    config = Config(severity_threshold="medium")
+    _summary, findings, _files, state = _prepare_review(config, SAMPLE_DIFF)
+    assert findings == []
+    assert state.all_findings == [low]
+    assert state.coverage == ReviewCoverage()
+
+
+def test_prepare_review_state_records_dropped_files_and_hunks(monkeypatch, capsys):
+    """A tight size limit drops the trailing hunk of the first file
+    and the whole second file; both are recorded in the coverage."""
+    monkeypatch.delenv("PR_SENTINEL_API_KEY", raising=False)
+    first = (
+        "diff --git a/one.py b/one.py\n"
+        "--- a/one.py\n"
+        "+++ b/one.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " a = 1\n"
+        "+eval(one)\n"
+        "@@ -10,1 +11,2 @@\n"
+        " b = 1\n"
+        "+eval(two)\n"
+    )
+    second = (
+        "diff --git a/two.py b/two.py\n"
+        "--- a/two.py\n"
+        "+++ b/two.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " c = 1\n"
+        "+eval(three)\n"
+    )
+    files = parse_diff(first + second)
+    one = files[0]
+    header = (
+        f"diff --git a/{one.old_path} b/{one.path}\n"
+        f"--- a/{one.old_path}\n"
+        f"+++ b/{one.path}\n"
+    )
+    budget = len(header + one.hunks[0].render()) + 5
+    config = Config(max_diff_chars=budget, severity_threshold="low")
+    _summary, _findings, kept, state = _prepare_review(config, first + second)
+    assert [f.path for f in kept] == ["one.py"]
+    assert len(kept[0].hunks) == 1
+    assert state.coverage.dropped_files == {"two.py"}
+    assert state.coverage.dropped_ranges == {"one.py": [(11, 13)]}
+    assert "dropped" in capsys.readouterr().err
 
 
 def test_post_review_dedupes_before_max_inline_comments():
