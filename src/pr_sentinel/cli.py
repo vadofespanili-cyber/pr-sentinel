@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import sys
-from dataclasses import fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -143,8 +143,8 @@ def _cmd_check_config(config_path: str | None) -> int:
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    for field in fields(config):
-        print(f"{field.name}: {getattr(config, field.name)}")
+    for cfg_field in fields(config):
+        print(f"{cfg_field.name}: {getattr(config, cfg_field.name)}")
     return 0
 
 
@@ -199,7 +199,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 3
     title = pull.get("title", "") if isinstance(pull, dict) else ""
-    summary, findings, files = _prepare_review(
+    summary, findings, files, state = _prepare_review(
         config,
         diff_text,
         pr_title=title,
@@ -209,7 +209,9 @@ def _cmd_review(args: argparse.Namespace) -> int:
     )
     if not args.dry_run:
         try:
-            _post_review(client, owner, repo, args.pr, config, summary, findings, files)
+            _post_review(
+                client, owner, repo, args.pr, config, summary, findings, files, state
+            )
         except GitHubError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 3
@@ -232,6 +234,7 @@ def _post_review(
     summary: str,
     findings: list[Finding],
     files: list[DiffFile],
+    review_state: ReviewState | None = None,
 ) -> None:
     """Post the summary as an idempotent issue comment, then (in inline
     mode) any inline comments as a review.
@@ -240,7 +243,10 @@ def _post_review(
     place, so re-pushes never spam the PR with a new summary each time.
     Inline comments go through create_review only when there is at least
     one to post, with a brief body — the full findings table lives in the
-    summary comment, not in every review.
+    summary comment, not in every review. Thread resolution uses
+    ``review_state`` when given: the severity-filtered ``findings`` are
+    not a complete view of the PR, so resolving against them would
+    close threads whose finding was only filtered out or truncated.
     """
     existing = _find_summary_comment(client, owner, repo, pr_number)
     if existing is not None:
@@ -274,7 +280,16 @@ def _post_review(
         )
     # Best effort only: resolving stale threads must never fail the
     # review, so any error here becomes a warning, not an exception.
-    _resolve_outdated_threads(client, owner, repo, pr_number, findings)
+    # The resolver sees the UNFILTERED findings: a finding hidden by
+    # the severity threshold is still an open issue, and coverage
+    # tells it which locations the review never saw.
+    resolver_findings = (
+        review_state.all_findings if review_state is not None else findings
+    )
+    resolver_coverage = review_state.coverage if review_state is not None else None
+    _resolve_outdated_threads(
+        client, owner, repo, pr_number, resolver_findings, resolver_coverage
+    )
 
 
 def _normalize_inline_body(body: str) -> str:
@@ -340,6 +355,7 @@ def _resolve_outdated_threads(
     repo: str,
     pr_number: int,
     findings: list[Finding],
+    coverage: ReviewCoverage | None = None,
 ) -> None:
     """Resolve our own inline threads whose finding is gone.
 
@@ -352,6 +368,15 @@ def _resolve_outdated_threads(
     to another line, and resolving the old thread would be wrong. Any
     failure (GraphQL error, missing permission) prints a warning and
     the review still succeeds — this is best effort.
+
+    ``findings`` must be the UNFILTERED findings: a finding hidden by
+    the severity threshold is still open, so resolving against the
+    filtered list would close its thread as if it were fixed.
+    ``coverage`` (when given) guards truncation the same way: a thread
+    in a dropped file, or on a line inside a dropped hunk, is never
+    resolved — the review never saw that location. A null-line thread
+    is resolved only when its file was fully reviewed, because with
+    no line the location cannot be checked against a single hunk.
     """
     current: set[tuple[str, int]] = {
         (finding.file, finding.line) for finding in findings if finding.line is not None
@@ -384,9 +409,19 @@ def _resolve_outdated_threads(
         if isinstance(line, int):
             if (path, line) in current:
                 continue
+            if coverage is not None and coverage.was_dropped(path, line):
+                # The finding's location was never reviewed on this
+                # push: it may still be there, just dropped by a
+                # size/file limit, so it must not look "fixed".
+                continue
         elif path in current_paths:
             # Outdated position (null line): only certainly stale when
             # the file has no current findings left at all.
+            continue
+        elif coverage is not None and not coverage.is_fully_reviewed(path):
+            # With no usable line the location cannot be checked
+            # against one hunk: a dropped hunk anywhere in the file
+            # may still hold the finding.
             continue
         if not _is_own_thread(thread, me):
             continue
@@ -485,7 +520,7 @@ def _run_and_report(
     reviewed_commit: str | None = None,
     instructions: str | None = None,
 ) -> int:
-    summary, findings, _files = _prepare_review(
+    summary, findings, _files, _state = _prepare_review(
         config,
         diff_text,
         pr_title=pr_title,
@@ -612,6 +647,78 @@ def _warn_gate_below_threshold(
         )
 
 
+@dataclass
+class ReviewCoverage:
+    """Which parts of the diff the review actually saw.
+
+    A thread may only be resolved when its location was reviewed: a
+    finding that is missing only because its file or hunk was dropped
+    (``ignore_paths``, ``max_files`` or ``max_diff_chars``) must never
+    look "fixed". Ranges are half-open new-file line intervals
+    ``[start, end)`` of the dropped hunks.
+    """
+
+    dropped_files: set[str] = field(default_factory=set)
+    dropped_ranges: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+
+    def was_dropped(self, path: str, line: int) -> bool:
+        """True when the line sits in a dropped file or dropped hunk."""
+        if path in self.dropped_files:
+            return True
+        return any(
+            start <= line < end for start, end in self.dropped_ranges.get(path, ())
+        )
+
+    def is_fully_reviewed(self, path: str) -> bool:
+        """True when every hunk of the file survived truncation."""
+        return path not in self.dropped_files and not self.dropped_ranges.get(path)
+
+
+@dataclass
+class ReviewState:
+    """Unfiltered findings plus coverage, for thread resolution.
+
+    The summary and inline comments use the severity-filtered
+    findings, but the resolver must see the complete view: a finding
+    hidden by the severity threshold is still an open issue.
+    """
+
+    all_findings: list[Finding]
+    coverage: ReviewCoverage
+
+
+def _compute_coverage(
+    all_paths: set[str],
+    original_ranges: dict[str, list[tuple[int, int]]],
+    kept_files: list[DiffFile],
+) -> ReviewCoverage:
+    """Coverage of the review: which files/hunks were dropped.
+
+    ``all_paths``/``original_ranges`` describe the parsed diff before
+    any limit; ``kept_files`` is what survived. A file dropped by
+    ``ignore_paths``, ``max_files`` or the size limit lands in
+    ``dropped_files``; a hunk dropped by the size limit lands in
+    ``dropped_ranges``. Kept hunks are compared by range, so the
+    result does not depend on which end was trimmed.
+    """
+    kept_paths = {diff_file.path for diff_file in kept_files}
+    dropped_files = set(all_paths) - kept_paths
+    dropped_ranges: dict[str, list[tuple[int, int]]] = {}
+    for diff_file in kept_files:
+        kept_ranges = {
+            (hunk.new_start, hunk.new_start + hunk.new_count)
+            for hunk in diff_file.hunks
+        }
+        dropped = [
+            hunk_range
+            for hunk_range in original_ranges.get(diff_file.path, [])
+            if hunk_range not in kept_ranges
+        ]
+        if dropped:
+            dropped_ranges[diff_file.path] = dropped
+    return ReviewCoverage(dropped_files=dropped_files, dropped_ranges=dropped_ranges)
+
+
 def _prepare_review(
     config: Config,
     diff_text: str,
@@ -619,7 +726,7 @@ def _prepare_review(
     pr_number: int | None = None,
     reviewed_commit: str | None = None,
     instructions: str | None = None,
-) -> tuple[str, list[Finding], list[DiffFile]]:
+) -> tuple[str, list[Finding], list[DiffFile], ReviewState]:
     """Parse, limit and review the diff, then filter and summarize.
 
     Order matters: ignored files are dropped before the file-count limit
@@ -628,8 +735,23 @@ def _prepare_review(
     size limit and the file-count limit drop the lowest-risk files
     first. The size limit is applied after parsing, by dropping whole
     trailing hunks/files — never by cutting raw text mid-hunk.
+
+    The returned state carries the pre-filter findings and the review
+    coverage, so thread resolution can tell a genuinely fixed finding
+    apart from one that was only filtered out or truncated away.
     """
     files = parse_diff(diff_text)
+    # Snapshot the pre-limit shape before anything mutates or drops
+    # files: _limit_diff_size pops hunks in place, so the dropped
+    # ranges must be recorded from the original hunks.
+    original_ranges = {
+        diff_file.path: [
+            (hunk.new_start, hunk.new_start + hunk.new_count)
+            for hunk in diff_file.hunks
+        ]
+        for diff_file in files
+    }
+    all_paths = {diff_file.path for diff_file in files}
     files = _drop_ignored_files(files, config.ignore_paths)
     files = sort_by_risk(files)
     files = _limit_diff_size(files, config.max_diff_chars)
@@ -639,9 +761,10 @@ def _prepare_review(
             file=sys.stderr,
         )
         files = files[: config.max_files]
-    findings, ai_used = _collect_findings(files, config, instructions=instructions)
+    coverage = _compute_coverage(all_paths, original_ranges, files)
+    all_findings, ai_used = _collect_findings(files, config, instructions=instructions)
     findings = sort_findings(
-        filter_findings(findings, threshold=config.severity_threshold)
+        filter_findings(all_findings, threshold=config.severity_threshold)
     )
     summary = build_summary(
         findings,
@@ -650,7 +773,12 @@ def _prepare_review(
         ai_used=ai_used,
         reviewed_commit=reviewed_commit,
     )
-    return summary, findings, files
+    return (
+        summary,
+        findings,
+        files,
+        ReviewState(all_findings=all_findings, coverage=coverage),
+    )
 
 
 def _drop_ignored_files(
