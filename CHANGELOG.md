@@ -118,6 +118,16 @@ All notable changes to pr-sentinel are documented here. The format follows
   `${...}` interpolations stay visible as code — an `eval()` inside
   an interpolation still fires, and an escaped backtick does not
   close the literal early.
+- **Auto-resolver no longer closes threads the review never saw
+  (bot review).** Thread resolution ran against the severity-filtered
+  findings, so a finding hidden by the severity threshold — or in a
+  file/hunk dropped by `max_diff_chars` / `max_files` /
+  `ignore_paths` — looked "fixed" and its thread was resolved. The
+  resolver now uses the pre-filter findings and the review coverage:
+  a thread is resolved only when its location was actually reviewed
+  and no finding remains there. A thread in a dropped file or inside
+  a dropped hunk is never resolved, and a null-line thread is
+  resolved only when its file was fully reviewed.
 
 ### Changed
 
